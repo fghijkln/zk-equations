@@ -1,0 +1,2 @@
+rootProject.name = 'Witness'
+include ':app'

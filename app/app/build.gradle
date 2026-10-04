@@ -1,0 +1,57 @@
+apply plugin: 'com.android.application'
+apply plugin: 'com.chaquo.python'
+
+android {
+    namespace 'com.witness.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.witness.app"
+        minSdk 24
+        targetSdk 34
+        // 版本号手写在这里（发版时同步改）；CI 会校验 versionName 与 git tag 一致，
+        // 不一致则构建失败。
+        versionCode 1
+        versionName "0.1.0"
+
+        ndk {
+            // 只留 arm64
+            abiFilters "arm64-v8a"
+        }
+
+        python {
+            // core/ 为纯标准库实现，零 pip 依赖
+            version "3.11"
+        }
+    }
+
+    signingConfigs {
+        release {
+            // CI 从 Secrets 注入；本地构建没有这些环境变量时用 debug 签名代替
+            def ksPath = System.getenv("WITNESS_KEYSTORE_PATH")
+            if (ksPath) {
+                storeFile file(ksPath)
+                storePassword System.getenv("WITNESS_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("WITNESS_KEY_ALIAS")
+                keyPassword System.getenv("WITNESS_KEY_PASSWORD")
+            } else {
+                initWith signingConfigs.debug
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

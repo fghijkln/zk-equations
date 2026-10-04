@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- keyhole: the witness stays locked inside -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="@color/gold"
+        android:strokeWidth="7"
+        android:pathData="M54,30 m-17,0 a17,17 0 1,0 34,0 a17,17 0 1,0 -34,0" />
+    <path
+        android:fillColor="@color/gold"
+        android:pathData="M48.5,50 h11 l4.5,32 h-20 z" />
+</vector>

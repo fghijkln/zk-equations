@@ -1,0 +1,100 @@
+name: Build Witness APK
+
+# 最小权限：checkout 读代码即可；产物上传不需要额外权限
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 完整历史 + tags：版本号校验需要 git describe 能看到 tag
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install SDK packages
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      # 增量构建：缓存 Gradle 发行版与全部依赖下载
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      # ZK 核心是纯 Python：构建前拷进 Chaquopy 的 python 源码目录
+      - name: Stage Python core
+        run: |
+          mkdir -p app/app/src/main/python/core
+          cp core/*.py app/app/src/main/python/core/
+          ls app/app/src/main/python/core/
+
+      # 桥接一致性检查：JS 调 WitnessApi.xxx() 必须在 Java 有
+      # @JavascriptInterface 方法，Java callAttr("yyy") 必须在
+      # zk_api.py 有对应函数。
+      - name: Check bridge consistency
+        run: |
+          python3 - <<'EOF'
+          import re
+          js = open("app/app/src/main/assets/www/index.html", encoding="utf-8").read()
+          java = open("app/app/src/main/java/com/witness/app/ZkBridge.java", encoding="utf-8").read()
+          py = open("app/app/src/main/python/zk_api.py", encoding="utf-8").read()
+          js_calls = set(re.findall(r'(?:WitnessApi|api\(\))\.(\w+)\(', js))
+          java_methods = set(re.findall(r'public String (\w+)\(', java))
+          py_calls = set(re.findall(r'callAttr\("(\w+)"', java))
+          py_defs = set(re.findall(r'^def (\w+)\(', py, re.M))
+          missing = (js_calls - java_methods) | (py_calls - py_defs)
+          assert not missing, f"桥接缺失: {missing}"
+          print(f"桥接一致: JS {len(js_calls)} / Java {len(java_methods)} / Python {len(py_defs)}")
+          EOF
+
+      - name: Restore release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_BASE64" | base64 -d > /tmp/witness-release.keystore
+
+      - name: Build release APK
+        env:
+          WITNESS_KEYSTORE_PATH: /tmp/witness-release.keystore
+          WITNESS_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          WITNESS_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          WITNESS_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
+          # 版本号手写在 app/app/build.gradle；如果打了 tag，tag 的版本必须与
+          # build.gradle 的 versionName 一致，否则直接失败，防止发版时忘改。
+          TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$TAG" ]; then
+            VER=${TAG#v}
+            GVER=$(grep -oP 'versionName "\K[^"]+' app/app/build.gradle)
+            GCODE=$(grep -oP 'versionCode \K[0-9]+' app/app/build.gradle | head -1)
+            if [ "$VER" != "$GVER" ]; then
+              echo "tag $TAG 与 build.gradle versionName $GVER 不一致" >&2
+              exit 1
+            fi
+            echo "version=$GVER ($GCODE)"
+          fi
+          cd app && ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: witness-apk
+          path: app/app/build/outputs/apk/release/*.apk

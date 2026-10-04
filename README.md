@@ -19,8 +19,10 @@ code has not been audited. Do not use it to protect real assets.
 
 - `core/` — pure-Python ZK core: curve ops, Pedersen commitments, inner-product
   argument, equation compiler, prover/verifier, public API.
-- `tests/` — correctness + tamper-resistance tests.
-- `app/` — Android app (Chaquopy Python + native shell), built via CI.
+- `tests/` — correctness + tamper-resistance tests (`python3 -m tests.test_zk`).
+- `app/` — the **Witness** Android app (Gradle project root): Chaquopy Python
+  shell around `core/` (copied in by CI), WebView UI, release signed via CI.
+  Built by GitHub Actions on every push to `main`.
 
 ## Quick start (core)
 

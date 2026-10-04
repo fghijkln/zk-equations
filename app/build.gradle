@@ -1,0 +1,19 @@
+// 顶层构建脚本：Android Gradle Plugin + Chaquopy（Python for Android）
+// 模板复用自 WebWeave (mssg-android)，已验证可用。
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.5.2'
+        classpath 'com.chaquo.python:gradle:16.1.0'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}

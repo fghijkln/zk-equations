@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Witness</title>
+<style>
+  :root { --bg:#101014; --card:#18181f; --gold:#E8B93C; --txt:#e8e8ea;
+          --dim:#9a9aa3; --line:#2a2a33; --ok:#4caf7d; --bad:#e05c5c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font-family:system-ui,-apple-system,"Noto Sans SC",sans-serif;
+         padding:16px; max-width:720px; margin:0 auto; }
+  header { display:flex; align-items:baseline; justify-content:space-between;
+           border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:16px; }
+  h1 { margin:0; font-size:22px; color:var(--gold); letter-spacing:1px; }
+  .tag { color:var(--dim); font-size:12px; margin-top:4px; }
+  #lang { background:var(--card); color:var(--txt); border:1px solid var(--line);
+          border-radius:6px; padding:6px 10px; font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:16px; margin-bottom:16px; }
+  .card h2 { margin:0 0 4px; font-size:16px; }
+  .card p.desc { margin:0 0 12px; font-size:13px; color:var(--dim); }
+  label { display:block; font-size:13px; color:var(--dim); margin:10px 0 4px; }
+  input[type=text], input[type=password], textarea {
+    width:100%; background:#0c0c10; color:var(--txt); border:1px solid var(--line);
+    border-radius:6px; padding:10px; font-size:15px; font-family:ui-monospace,monospace; }
+  textarea { min-height:110px; resize:vertical; }
+  button {
+    display:block; width:100%; margin-top:14px; padding:12px; font-size:16px;
+    background:var(--gold); color:#141414; border:none; border-radius:8px;
+    font-weight:700; }
+  button:disabled { opacity:.5; }
+  button.ghost { background:transparent; color:var(--gold);
+                 border:1px solid var(--gold); margin-top:8px; font-size:14px;
+                 padding:9px; font-weight:400; }
+  #proveOut, #verifyOut { margin-top:12px; font-size:14px; }
+  #proofJson { font-size:11px; min-height:90px; color:#b9e6c8; }
+  .verdict { text-align:center; font-size:26px; font-weight:800; padding:18px;
+             border-radius:8px; margin-top:12px; }
+  .verdict.ok { background:rgba(76,175,125,.14); color:var(--ok);
+                border:1px solid var(--ok); }
+  .verdict.bad { background:rgba(224,92,92,.12); color:var(--bad);
+                 border:1px solid var(--bad); }
+  .err { color:var(--bad); font-size:13px; margin-top:8px; word-break:break-word; }
+  footer { color:var(--dim); font-size:11px; text-align:center; margin-top:8px;
+           line-height:1.7; }
+  .mono { font-family:ui-monospace,monospace; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Witness</h1>
+    <div class="tag" id="t_tagline"></div>
+  </div>
+  <button id="lang" style="width:auto;margin:0">EN</button>
+</header>
+
+<div class="card">
+  <h2 id="t_prove_h"></h2>
+  <p class="desc" id="t_prove_d"></p>
+  <label id="t_eq_l"></label>
+  <input type="text" id="eq" value="x^3 + 2*x + 5 = 38" autocapitalize="off"
+         autocomplete="off" spellcheck="false">
+  <label id="t_wit_l"></label>
+  <input type="password" id="wit" placeholder="3" inputmode="numeric"
+         autocomplete="off">
+  <button id="btnProve"></button>
+  <div id="proveOut"></div>
+</div>
+
+<div class="card">
+  <h2 id="t_verify_h"></h2>
+  <p class="desc" id="t_verify_d"></p>
+  <label id="t_eq2_l"></label>
+  <input type="text" id="eq2" value="x^3 + 2*x + 5 = 38" autocapitalize="off"
+         autocomplete="off" spellcheck="false">
+  <label id="t_proof_l"></label>
+  <textarea id="proofIn" class="mono" spellcheck="false"></textarea>
+  <button id="btnVerify"></button>
+  <div id="verifyOut"></div>
+</div>
+
+<footer id="t_footer"></footer>
+
+<script>
+const STR = {
+  zh: {
+    tagline: "零知识方程证明 · 证明你知道解，但不透露它",
+    prove_h: "生成证明", prove_d: "输入方程和你知道的解（witness），生成零知识证明。解只参与本机计算，永远不会进入证明内容。",
+    eq_l: "方程", wit_l: "解（保密）", btnProve: "生成证明",
+    verify_h: "验证证明", verify_d: "任何人拿到方程和证明，都能确认方程成立——但无法得知解是多少。",
+    proof_l: "证明（JSON）", btnVerify: "验证",
+    working: "计算中…", copy: "复制证明",
+    pass: "✓ 验证通过", fail: "✗ 验证不通过",
+    copied: "已复制", footer: "Bulletproofs 算术电路证明 · 纯 Python 实现，无需可信设置<br>学习级实现：数学真实，未经审计，请勿用于保护真实资产",
+    errApi: "桥接不可用"
+  },
+  en: {
+    tagline: "Zero-knowledge proofs for equations · prove you know x, without revealing it",
+    prove_h: "Prove", prove_d: "Enter an equation and the solution (witness) you know. The witness only takes part in local computation and never enters the proof.",
+    eq_l: "Equation", wit_l: "Witness (secret)", btnProve: "Generate proof",
+    verify_h: "Verify", verify_d: "Anyone with the equation and the proof can confirm it holds — without learning the witness.",
+    proof_l: "Proof (JSON)", btnVerify: "Verify",
+    working: "Computing…", copy: "Copy proof",
+    pass: "✓ VALID", fail: "✗ INVALID",
+    copied: "Copied", footer: "Bulletproofs arithmetic-circuit proofs · pure Python, no trusted setup<br>Learning-grade: real math, not audited — do not protect real assets with it",
+    errApi: "Bridge unavailable"
+  }
+};
+let lang = "zh";
+function applyLang() {
+  const t = STR[lang];
+  document.documentElement.lang = lang === "zh" ? "zh" : "en";
+  for (const k of Object.keys(t)) {
+    const el = document.getElementById("t_" + k);
+    if (el) el.innerHTML = t[k];
+  }
+  document.getElementById("btnProve").textContent = t.btnProve;
+  document.getElementById("btnVerify").textContent = t.btnVerify;
+  document.getElementById("lang").textContent = lang === "zh" ? "EN" : "中文";
+}
+document.getElementById("lang").onclick = () => {
+  lang = lang === "zh" ? "en" : "zh"; applyLang();
+};
+
+function api() {
+  if (window.WitnessApi) return window.WitnessApi;
+  throw new Error(STR[lang].errApi);
+}
+
+document.getElementById("btnProve").onclick = () => {
+  const out = document.getElementById("proveOut");
+  const btn = document.getElementById("btnProve");
+  out.innerHTML = ""; btn.disabled = true;
+  btn.textContent = STR[lang].working;
+  setTimeout(() => {
+    try {
+      const r = JSON.parse(api().prove(
+        document.getElementById("eq").value,
+        document.getElementById("wit").value));
+      if (r.ok) {
+        const pj = JSON.stringify(r.proof);
+        out.innerHTML =
+          '<label>' + STR[lang].proof_l + '</label>' +
+          '<textarea id="proofJson" class="mono" readonly></textarea>' +
+          '<button class="ghost" id="btnCopy">' + STR[lang].copy + '</button>';
+        document.getElementById("proofJson").value = pj;
+        document.getElementById("btnCopy").onclick = (e) => {
+          navigator.clipboard.writeText(pj).catch(() => {});
+          e.target.textContent = STR[lang].copied;
+        };
+      } else {
+        out.innerHTML = '<div class="err">' + escapeHtml(r.error) + '</div>';
+      }
+    } catch (e) {
+      out.innerHTML = '<div class="err">' + escapeHtml(String(e)) + '</div>';
+    }
+    btn.disabled = false; btn.textContent = STR[lang].btnProve;
+  }, 30);
+};
+
+document.getElementById("btnVerify").onclick = () => {
+  const out = document.getElementById("verifyOut");
+  const btn = document.getElementById("btnVerify");
+  out.innerHTML = ""; btn.disabled = true;
+  btn.textContent = STR[lang].working;
+  setTimeout(() => {
+    try {
+      const r = JSON.parse(api().verify(
+        document.getElementById("eq2").value,
+        document.getElementById("proofIn").value));
+      if (r.ok) {
+        out.innerHTML = '<div class="verdict ' + (r.valid ? "ok" : "bad") + '">' +
+          (r.valid ? STR[lang].pass : STR[lang].fail) + '</div>';
+      } else {
+        out.innerHTML = '<div class="err">' + escapeHtml(r.error) + '</div>';
+      }
+    } catch (e) {
+      out.innerHTML = '<div class="err">' + escapeHtml(String(e)) + '</div>';
+    }
+    btn.disabled = false; btn.textContent = STR[lang].btnVerify;
+  }, 30);
+};
+
+function escapeHtml(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+applyLang();
+</script>
+</body>
+</html>
