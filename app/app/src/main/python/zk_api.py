@@ -18,14 +18,16 @@ def _err(msg):
     return json.dumps({"ok": False, "error": msg}, ensure_ascii=False)
 
 
-def prove(equation, witness):
-    """Prove knowledge of `witness` (int, as string) for `equation`."""
+def prove(equation, witness, precision=""):
+    """Prove knowledge of `witness` for `equation`.
+
+    witness: integer string (exact mode) or decimal string (tolerance).
+    precision: k as string; required in tolerance mode (final precision
+    1/k), ignored in exact mode.
+    """
     try:
-        w = int(witness.strip())
-    except (ValueError, AttributeError):
-        return _err("witness must be an integer")
-    try:
-        proof = zk.prove_equation(equation.strip(), w)
+        proof = zk.prove_equation(equation.strip(), witness.strip(),
+                                  (precision or "").strip())
     except ValueError as e:
         return _err(str(e))
     except Exception:
@@ -33,14 +35,18 @@ def prove(equation, witness):
     return json.dumps({"ok": True, "proof": proof}, ensure_ascii=False)
 
 
-def verify(equation, proof_json):
-    """Verify a proof (JSON string) against `equation`."""
+def verify(equation, proof_json, precision=""):
+    """Verify a proof (JSON string) against `equation`.
+
+    precision: k as string; if empty, taken from the proof itself.
+    """
     try:
         proof = json.loads(proof_json)
     except (ValueError, TypeError):
         return _err("proof is not valid JSON")
     try:
-        valid = zk.verify_equation(equation.strip(), proof)
+        valid = zk.verify_equation(equation.strip(), proof,
+                                   (precision or "").strip())
     except Exception:
         return _err("verify failed")
     return json.dumps({"ok": True, "valid": bool(valid)}, ensure_ascii=False)

@@ -92,6 +92,7 @@ def prove(circuit, aL, aR, aO):
     tr.append_str("proto", "zkeq-circuit-v1")
     tr.append_int("n", n)
     tr.append_int("Q", Q)
+    tr.append_str("eq", circuit.canonical)
 
     # ---- Part 1: commit to the wires ----
     alpha, beta, rho = _rand(), _rand(), _rand()
@@ -228,6 +229,7 @@ def verify(circuit, proof):
         tr.append_str("proto", "zkeq-circuit-v1")
         tr.append_int("n", n)
         tr.append_int("Q", Q)
+        tr.append_str("eq", circuit.canonical)
         tr.append_point("AI", AI)
         tr.append_point("AO", AO)
         tr.append_point("S", S)

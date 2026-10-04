@@ -166,6 +166,57 @@ ok = api.verify_equation(eq_big, pb)
 tv = time.time() - t0
 check("degree-9 equation verifies (prove %.2fs, verify %.2fs)" % (tp, tv), ok)
 
+# ---------------- 6. canonical binding: moved terms verify ----------------
+# (regression test for the "moved term shows as failed" bug: proofs are
+# bound to the polynomial normal form, not the raw string)
+
+pm = api.prove_equation("x^3 + 2*x + 5 = 38", 3)
+check("moved term verifies", api.verify_equation("x^3 + 2*x = 33", pm))
+check("reordered verifies",
+      api.verify_equation("38 = x^3 + 2*x + 5", pm))
+check("different equation still fails",
+      api.verify_equation("x^3 + 2*x + 5 = 39", pm) is False)
+check("scaled (different poly) still fails",
+      api.verify_equation("2*x^3 + 4*x + 10 = 76", pm) is False)
+
+# ---------------- 7. tolerance mode: decimals & transcendental ----------------
+
+t0 = time.time()
+pt = api.prove_equation("sin(x) = 0.5", "0.5236", "1000")
+tpt = time.time() - t0
+t0 = time.time()
+okt = api.verify_equation("sin(x) = 0.5", pt, "1000")
+tvt = time.time() - t0
+check("sin(x)=0.5 @1/1000 verifies (prove %.1fs, verify %.1fs)" % (tpt, tvt),
+      okt and api.verify_equation("sin(x) = 0.5", pt))  # k from proof
+check("sin moved term verifies",
+      api.verify_equation("sin(x) - 0.5 = 0", pt, "1000"))
+check("sin wrong k fails",
+      api.verify_equation("sin(x) = 0.5", pt, "100") is False)
+expect_raises("sin bad witness refused",
+              lambda: api.prove_equation("sin(x) = 0.5", "1.0", "1000"))
+expect_raises("sin missing precision refused",
+              lambda: api.prove_equation("sin(x) = 0.5", "0.5236", ""))
+
+pdec = api.prove_equation("x = 0.5", "0.5", "1000")
+check("decimal x=0.5 verifies", api.verify_equation("x = 0.5", pdec, "1000"))
+expect_raises("decimal bad witness refused",
+              lambda: api.prove_equation("x = 0.5", "0.6", "1000"))
+
+pexp = api.prove_equation("exp(x) = 2.7183", "1.0", "1000")
+check("exp(x)=2.7183 verifies",
+      api.verify_equation("exp(x) = 2.7183", pexp, "1000"))
+pln = api.prove_equation("ln(x) = 0.4055", "1.5", "1000")
+check("ln(x)=0.4055 @1/1000 verifies",
+      api.verify_equation("ln(x) = 0.4055", pln, "1000"))
+
+# tampering with the embedded precision must fail (k falls back to the
+# proof's own value, so the canonical form mismatches)
+pt2 = copy.deepcopy(pt)
+pt2["precision"] = 100
+check("tampered precision -> False",
+      api.verify_equation("sin(x) = 0.5", pt2) is False)
+
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))
 if FAIL:

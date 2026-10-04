@@ -44,6 +44,27 @@ def main():
     print("proof replayed against '= 42' verifies: %s (must be False)" % ok2)
     assert not ok2
 
+    # ...but a term-moved spelling of the SAME equation verifies fine.
+    ok3 = api.verify_equation("x^3 + 2*x = 33", proof)
+    print("term-moved 'x^3 + 2*x = 33' verifies: %s (must be True)" % ok3)
+    assert ok3
+
+    # Transcendental equation: sin(x) = 0.5, precision 1/1000.
+    print()
+    print("equation : sin(x) = 0.5   (precision k = 1000, i.e. 1/1000)")
+    print("witness  : x = 0.5236  (kept secret from the verifier)")
+    t0 = time.time()
+    proof2 = api.prove_equation("sin(x) = 0.5", "0.5236", "1000")
+    t_prove2 = time.time() - t0
+    print("prove    : %.2fs" % t_prove2)
+    print("proof size: %d bytes JSON" % len(json.dumps(proof2)))
+    t0 = time.time()
+    ok4 = api.verify_equation("sin(x) = 0.5", proof2, "1000")
+    print("verify   : %.2fs -> %s" % (time.time() - t0, ok4))
+    assert ok4, "honest transcendental proof must verify"
+    print("moved-term spelling verifies: %s (must be True)"
+          % api.verify_equation("sin(x) - 0.5 = 0", proof2, "1000"))
+
 
 if __name__ == "__main__":
     main()
