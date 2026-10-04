@@ -46,6 +46,9 @@ CASES = [
     ("x^5 = 32", 2),              # degree 5
     ("3 = 3", 0),                 # constant-true equation
     ("x - x = 0", 12345),         # degenerate: any witness works
+    ("-x^2 = -4", 2),             # unary minus binds looser than ^
+    ("-x^2 = -4", -2),
+    ("-(x + 1)^2 = -9", 2),
 ]
 
 for eq, w in CASES:

@@ -124,6 +124,15 @@ class Parser:
                 return node
 
     def parse_factor(self):
+        # Unary minus binds LOOSER than ^, as in standard math/Python:
+        # "-x^2" is -(x^2), not (-x)^2.
+        t = self.peek()
+        if t is not None and t.kind == Tok.MINUS:
+            self.next()
+            return _pneg(self.parse_factor())
+        if t is not None and t.kind == Tok.PLUS:
+            self.next()
+            return self.parse_factor()
         node = self.parse_primary()
         t = self.peek()
         if t is not None and t.kind == Tok.POW:
@@ -145,10 +154,6 @@ class Parser:
             if self.next().kind != Tok.RP:
                 raise ValueError("missing ')'")
             return node
-        if t.kind == Tok.MINUS:
-            return _pneg(self.parse_primary())
-        if t.kind == Tok.PLUS:
-            return self.parse_primary()
         raise ValueError("unexpected token %r" % (t,))
 
 

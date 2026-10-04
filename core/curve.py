@@ -1,6 +1,7 @@
 """secp256k1 group operations -- pure Python, standard library only.
 
-Affine coordinates with plain double-and-add scalar multiplication.
+Multi-scalar multiplication in Jacobian coordinates (one doubling chain
+shared by all terms, single modular inverse at the end).
 Scalars live in Z_n (n = curve order); field arithmetic is mod p.
 
 Security note: this is a learning-grade implementation (no constant-time

@@ -1,9 +1,23 @@
 """Improved inner-product argument (Bulletproofs paper, Section 3).
 
-Protocol 2 proves relation (1):
-    P = g^a * h^b * u^c   and   <a, b> = c
-by reducing to Protocol 1, which proves relation (2):
-    P = g^a * h^b * u^<a,b>
+Protocol 2 proves the relation
+    P = g^a * h^b   and   <a, b> = c
+i.e. knowledge of vectors with a given inner product, where P carries
+NO u^c term. (This differs from the paper's relation (1), which is
+P = g^a*h^b*u^c; the circuit protocol in bulletproof.py hands us a P
+without the u^c factor, so the reduction below is adapted accordingly.)
+
+Reduction (sound variant of the paper's Protocol 2): verifier sends
+w <- Z_p^* (after P and the scalar c are fixed in the transcript);
+both compute P' = P * u^{w*c}, u' = u^w; then Protocol 1 proves
+    P' = g^a * h^b * u'^{<a,b>}.
+Soundness: P' = g^a*h^b*u^{w*c} matches g^a*h^b*(u^w)^{<a,b>} iff
+w*c = w*<a,b> iff c = <a,b> (w != 0). Since P and c are fixed before
+w is drawn, a cheating prover cannot tune them to a lucky w
+(rewinding argument: two distinct challenges force the extracted
+(a, b) to coincide by DLOG binding, hence <a,b> = c and P = g^a*h^b).
+
+Protocol 1 then proves relation (2):  P = g^a * h^b * u^<a,b>
 with 2*log2(n) group elements + 2 scalars of communication.
 
 Non-interactive via the Fiat-Shamir transcript (paper Section 4.4).
@@ -99,12 +113,18 @@ def verify_relation2(g, h, u, P, proof, tr):
 
 
 def prove(g, h, u, P, c, a, b, tr):
-    """Protocol 2 (prover): relation (1), P = g^a h^b u^c with <a,b> = c."""
+    """Protocol 2 (prover): prove  P = g^a * h^b  and  <a, b> = c.
+
+    Reduction: draw w, set P' = P * u^{w*c} and u' = u^w, then run
+    Protocol 1 to prove  P' = g^a * h^b * u'^{<a,b>}.
+    (See the module docstring for why this reduction is sound.)
+    """
     tr.append_point("ip1-P", P)
     tr.append_scalar("ip1-c", c)
     w = tr.challenge("ip1-w")
-    # P' = P * u^{w*c}; run Protocol 1 with blinding generator u^w
-    # (paper Protocol 2, steps 34-35)
+    # P' = P * u^{w*c}; run Protocol 1 with blinding generator u' = u^w.
+    # NOTE: this is intentionally NOT the paper's P' -- the paper's
+    # relation (1) carries an extra u^c in P, ours doesn't (see above).
     P2 = curve.add(P, curve.mul((w * c) % curve.N, u))
     return prove_relation2(g, h, curve.mul(w, u), P2, a, b, tr)
 
