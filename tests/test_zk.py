@@ -206,9 +206,13 @@ expect_raises("decimal bad witness refused",
 pexp = api.prove_equation("exp(x) = 2.7183", "1.0", "1000")
 check("exp(x)=2.7183 verifies",
       api.verify_equation("exp(x) = 2.7183", pexp, "1000"))
-pln = api.prove_equation("ln(x) = 0.4055", "1.5", "1000")
-check("ln(x)=0.4055 @1/1000 verifies",
-      api.verify_equation("ln(x) = 0.4055", pln, "1000"))
+pln = api.prove_equation("ln(x) = 0.6931", "2.0", "1000")
+check("ln(x)=0.6931 @1/1000 verifies",
+      api.verify_equation("ln(x) = 0.6931", pln, "1000"))
+# Chebyshev on [1,2] is accurate at x=2 (Taylor-12 was ~0.04 off there)
+pcheb = api.prove_equation("cos(x) = 0.5", "1.0472", "1000")
+check("cos(x)=0.5 @1/1000 verifies",
+      api.verify_equation("cos(x) = 0.5", pcheb, "1000"))
 
 # tampering with the embedded precision must fail (k falls back to the
 # proof's own value, so the canonical form mismatches)

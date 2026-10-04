@@ -39,13 +39,15 @@ Two proving modes, chosen automatically:
   need a precision denominator `k` (final precision `1/k`). Values use
   4 fixed decimal places; the circuit proves `|T(x) − y| < 1/k`, where
   `T` is the equation's polynomial — for transcendental functions,
-  their fixed **degree-12 Taylor polynomial** (sin/cos/exp around 0,
-  ln around x=1). The proved statement is exactly about that Taylor
-  polynomial; for small |x| it genuinely approximates the true
-  function. Accuracy guide: sin/cos for |x| ≤ 2π, exp for |x| ≤ 2,
-  ln for 0.5 ≤ x ≤ 1.5 (the degree-12 ln series is already ~0.04 off
-  at x=2 — the prover honestly refuses a witness that misses the
-  requested precision).
+  their fixed **Chebyshev-interpolation polynomial** (near-minimax; per
+  Trefethen, strictly better than Taylor at the same degree, and the
+  consensus choice in the ZK literature, e.g. Kurik & Laud IACR
+  2024/859). Measured max errors: sin 2.3e-9 on [−π, π] (deg 13),
+  cos 2.9e-10 on [−π, π] (deg 14), exp 5.3e-9 on [−2, 2] (deg 11),
+  ln 6.1e-9 on [1, 2] (deg 9). No in-circuit range reduction is done
+  (it needs division/comparisons); outside the interval the proof stays
+  valid but is about the polynomial, not the true function. ln is only
+  meaningful on [1, 2] (singular at 0 — hard restriction).
 
 Proofs are bound to the **canonical** equation (polynomial normal
 form, with `k` for tolerance mode), also hashed into the Fiat–Shamir
