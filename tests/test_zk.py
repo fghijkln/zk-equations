@@ -217,6 +217,25 @@ pt2["precision"] = 100
 check("tampered precision -> False",
       api.verify_equation("sin(x) = 0.5", pt2) is False)
 
+# ---------------- 8. exact/tolerance mode agreement ----------------
+# exact equation + decimal witness -> friendly error, not a raw int() crash
+try:
+    api.prove_equation("x^5=1", "1.001", "1000")
+    check("decimal witness on exact equation refused", False)
+except ValueError as e:
+    check("decimal witness on exact equation refused",
+          "integer" in str(e) and "invalid literal" not in str(e))
+# exact equation with a (now ignored) precision still works
+pe = api.prove_equation("x^5=1", 1, "1000")
+check("exact equation ignores precision",
+      api.verify_equation("x^5=1", pe))
+# decimal equation forces tolerance mode and requires k
+expect_raises("decimal equation without precision refused",
+              lambda: api.prove_equation("x^5 = 1.0", "1.0", ""))
+pt5 = api.prove_equation("x^5 = 1.0", "1.0", "1000")
+check("x^5=1.0 @1/1000 verifies",
+      api.verify_equation("x^5 = 1.0", pt5, "1000"))
+
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))
 if FAIL:

@@ -48,7 +48,16 @@ def prove_equation(eq_str, witness, precision=""):
     """
     circ = circuit_mod.compile(eq_str, precision)
     if circ.mode == "exact":
-        w = witness if isinstance(witness, int) else int(str(witness).strip())
+        if isinstance(witness, int):
+            w = witness
+        else:
+            try:
+                w = int(str(witness).strip())
+            except (ValueError, AttributeError):
+                raise ValueError(
+                    "witness must be an integer for this exact equation; "
+                    "for a decimal witness, write the equation with decimals "
+                    "(e.g. x^5 = 1.0) and set precision k")
         if not circ.check_witness(w):
             raise ValueError("witness does not satisfy the equation")
         aL, aR, aO = circ.evaluate(w)

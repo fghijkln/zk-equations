@@ -148,6 +148,7 @@ class Parser:
         self.toks = toks
         self.pos = 0
         self.trans_used = False
+        self.float_seen = False
 
     def peek(self):
         return self.toks[self.pos] if self.pos < len(self.toks) else None
@@ -218,6 +219,7 @@ class Parser:
         if t.kind == Tok.INT:
             return {0: Fraction(t.val)}
         if t.kind == Tok.FLOAT:
+            self.float_seen = True
             return {0: t.val}
         if t.kind == Tok.X:
             return {1: Fraction(1)}
@@ -301,9 +303,10 @@ _TAYLORS = {
 
 
 def parse_polynomial(eq_str):
-    """Parse 'lhs = rhs' into ({exp: Fraction} for lhs - rhs, trans_used)."""
+    """Parse 'lhs = rhs' into ({exp: Fraction} for lhs - rhs,
+    trans_used, float_seen)."""
     parser = Parser(tokenize(eq_str))
-    return parser.parse_equation(), parser.trans_used
+    return parser.parse_equation(), parser.trans_used, parser.float_seen
 
 
 # ---------------- canonical form ----------------
@@ -356,7 +359,7 @@ class Circuit:
       canonical: canonical equation string the proof is bound to
     """
 
-    def __init__(self, eq_str, poly, precision, trans_used):
+    def __init__(self, eq_str, poly, precision, trans_used, float_seen):
         self.eq_str = eq_str
         # Normalize overall sign (leading coefficient positive) so that
         # "38 = x^3+2*x+5" and "x^3+2*x+5 = 38" compile to the identical
@@ -365,8 +368,10 @@ class Circuit:
             lc = poly[max(poly.keys())]
             if lc < 0:
                 poly = {e: -c for e, c in poly.items()}
-        needs_tol = trans_used or any(c.denominator != 1
-                                      for c in poly.values())
+        # Any decimal literal (even "1.0") or transcendental function
+        # selects tolerance mode: what you write is what you get.
+        needs_tol = (trans_used or float_seen
+                     or any(c.denominator != 1 for c in poly.values()))
         if not needs_tol:
             self.mode = "exact"
             self.precision = None
@@ -675,5 +680,5 @@ def compile(eq_str, precision=""):
     Raises ValueError on syntax errors, unsatisfiable equations, or a
     missing/invalid precision.
     """
-    poly, trans_used = parse_polynomial(eq_str)
-    return Circuit(eq_str, poly, precision, trans_used)
+    poly, trans_used, float_seen = parse_polynomial(eq_str)
+    return Circuit(eq_str, poly, precision, trans_used, float_seen)

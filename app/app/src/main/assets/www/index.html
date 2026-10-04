@@ -146,9 +146,9 @@ function api() {
   throw new Error(STR[lang].errApi);
 }
 
-// Tolerance mode is needed when the equation has decimals or
-// transcendental functions; then the precision box is shown.
-function needsTol(eq) { return /[a-zA-Z.]/.test(eq); }
+// Tolerance mode is needed when the equation has a decimal number or a
+// transcendental function. (The variable x alone does not count.)
+function needsTol(eq) { return /sin|cos|exp|ln/i.test(eq) || /\d\.\d|\.\d|\d\./.test(eq); }
 
 function updatePrec() {
   document.getElementById("precRow").style.display =
