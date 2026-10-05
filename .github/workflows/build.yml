@@ -45,10 +45,11 @@ jobs:
           export CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
           sudo apt-get update -qq && sudo apt-get install -y -qq python${PYVER}-dev > /dev/null
-          # Minimal pyconfig.h for Android arm64 (system one is multiarch
-          # and references aarch64-linux-gnu path that doesn't exist)
-          sudo mkdir -p /usr/include/aarch64-linux-gnu/python${PYVER}
-          sudo tee /usr/include/aarch64-linux-gnu/python${PYVER}/pyconfig.h > /dev/null <<'EOF'
+          # Local include dir: copy Python headers, replace the multiarch
+          # pyconfig.h with a minimal Android arm64 version.
+          mkdir -p /tmp/pyinclude
+          cp -r /usr/include/python${PYVER}/* /tmp/pyinclude/
+          cat > /tmp/pyinclude/pyconfig.h <<'EOF'
           /* Minimal pyconfig.h for Android arm64 (LP64 little-endian) */
           #define HAVE_STDIO_H 1
           #define HAVE_STDLIB_H 1
@@ -67,7 +68,7 @@ jobs:
           #define PY_FORMAT_SIZE_T "z"
           EOF
           $CC -shared -fPIC -O2 -std=c99 -Wall \
-            -I/usr/include/python${PYVER} \
+            -I/tmp/pyinclude \
             -DANDROID \
             core/cext/curve_ext.c \
             -o app/app/src/main/python/curve_ext.so
