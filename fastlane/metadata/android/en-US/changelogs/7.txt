@@ -1,0 +1,3 @@
+• Human-readable proof certificate: proofs render as a traditional math proof (Proposition / Proof / QED), bilingual
+• F-Droid preparation: MIT license, Fastlane metadata, clean-checkout build support
+• Proof now records circuit dimensions for challenge replay
