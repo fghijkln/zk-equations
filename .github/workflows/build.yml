@@ -158,6 +158,7 @@ jobs:
           TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
           if [ -n "$TAG" ]; then
             VER=${TAG#v}
+            VER=${VER%%-*}  # strip -debug3 etc.: v5.0-debug3 -> 5.0
             GVER=$(grep -oP 'versionName "\K[^"]+' app/app/build.gradle)
             GCODE=$(grep -oP 'versionCode \K[0-9]+' app/app/build.gradle | head -1)
             if [ "$VER" != "$GVER" ]; then
