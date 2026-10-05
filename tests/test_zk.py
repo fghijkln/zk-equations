@@ -226,20 +226,37 @@ check("cos(x)=0.5 @1/1000 verifies",
 # strict precision: witness must be within 1/(k*10^4) of an exact root
 expect_raises("4-decimal witness now refused (not within 1/(k*10^4))",
               lambda: api.prove_equation("sin(x) = 0.5", "0.5236", "1000"))
-expect_raises("9-decimal witness refused",
-              lambda: api.prove_equation("sin(x) = 0.5", "0.523598776",
+expect_raises("13-decimal witness refused",
+              lambda: api.prove_equation("sin(x) = 0.5", "0.5235987755983",
                                         "1000"))
+# 10-decimal witness (from solver) is accepted
+w10 = api.solve_equation("sin(x) = 0.5", decimals=10)[0]
+check("10-decimal solver root accepted",
+      api.verify_equation("sin(x) = 0.5",
+                          api.prove_equation("sin(x) = 0.5", w10, "1000"),
+                          "1000"))
 # solver: accuracy + display
 sr = api.solve_equation("x^2 = 2", decimals=8)
 check("solver x^2=2 -> +-1.41421356",
       sr == ["-1.41421356", "1.41421356"])
 sr5 = api.solve_equation("(x-1)*(x-2)*(x-3)*(x-4)*(x-5)*(x-6) = 0",
                          decimals=8)
-check("solver shows at most 5 roots", len(sr5) == 5 and sr5[0] == "1.00000000")
+check("solver shows at most 5 roots", len(sr5) == 5 and sr5[0] == "1")
 check("solver no real roots -> []",
       api.solve_equation("x^2 + 1 = 0", decimals=8) == [])
-check("solver double root -> single 0.00000000",
-      api.solve_equation("x^2 = 0", decimals=8) == ["0.00000000"])
+check("solver double root -> single '0'",
+      api.solve_equation("x^2 = 0", decimals=8) == ["0"])
+# exact equation: solver returns plain integer; tapping it proves fine
+check("solver exact eq returns '3'",
+      api.solve_equation("x^3 + 2*x + 5 = 38", decimals=10) == ["3"])
+pex = api.prove_equation("x^3 + 2*x + 5 = 38", "3")
+check("tapped integer witness proves",
+      api.verify_equation("x^3 + 2*x + 5 = 38", pex))
+pex2 = api.prove_equation("x^3 + 2*x + 5 = 38", "3.0000000000")
+check("decimal-form integer witness proves",
+      api.verify_equation("x^3 + 2*x + 5 = 38", pex2))
+expect_raises("non-integer witness refused in exact mode",
+              lambda: api.prove_equation("x^3 + 2*x + 5 = 38", "3.5"))
 
 # tampering with the embedded precision must fail (k falls back to the
 # proof's own value, so the canonical form mismatches)

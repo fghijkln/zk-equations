@@ -23,14 +23,13 @@ from . import circuit as circuit_mod
 from . import solve as solve_mod
 
 M_DEC = circuit_mod.M_DEC
-WIT_DECIMALS = 8  # witness / solver display: up to 8 decimal places
+WIT_DECIMALS = 12  # witness: up to 12 decimal places (solver max)
 
 
 def _parse_witness_full(w):
     """Parse a decimal witness string to a Fraction (full precision).
 
-    Allows up to 8 decimal places (more are rejected: the precision
-    guarantee needs them)."""
+    Allows up to 12 decimal places (matches the solver's max)."""
     s = str(w).strip()
     try:
         fr = Fraction(s)
@@ -74,7 +73,7 @@ def prove_equation(eq_str, witness, precision=""):
     """Prove knowledge of `witness` satisfying `eq_str`.
 
     witness: int (exact mode) or decimal string (tolerance mode, up to
-             8 decimal places; an int is also accepted).
+             12 decimal places; an int is also accepted).
     precision: k (int/str), required in tolerance mode. Strict
                definition: the witness must be within 1/(k*10^4) of an
                exact root, else ValueError ("refuse"). Ignored in exact
@@ -87,9 +86,16 @@ def prove_equation(eq_str, witness, precision=""):
         if isinstance(witness, int):
             w = witness
         else:
+            s = str(witness).strip()
             try:
-                w = int(str(witness).strip())
-            except (ValueError, AttributeError):
+                fr = Fraction(s)
+            except (ValueError, ZeroDivisionError):
+                fr = None
+            if fr is not None and fr.denominator == 1:
+                # "3", "3.0", "3.0000000000" (e.g. tapped from the
+                # solver) are all the integer 3
+                w = int(fr)
+            else:
                 raise ValueError(
                     "witness must be an integer for this exact equation; "
                     "for a decimal witness, write the equation with decimals "
@@ -126,9 +132,20 @@ def solve_equation(eq_str, decimals=8):
         dec = int(str(decimals).strip())
     except (ValueError, AttributeError):
         raise ValueError("decimals must be an integer 1..12")
-    roots = solve_mod.solve_equation(eq_str.strip(), decimals=dec)
-    fmt = "%." + str(dec) + "f"
-    return [fmt % v for v in roots]
+    eq = eq_str.strip()
+    roots = solve_mod.solve_equation(eq, decimals=dec)
+    # exact (integer) equations: show integral roots as plain integers
+    # ("3", not "3.00000000") so they can be tapped straight into prove
+    poly, trans_used, float_seen = circuit_mod.parse_polynomial(eq)
+    exact = (not trans_used and not float_seen
+             and all(c.denominator == 1 for c in poly.values()))
+    out = []
+    for v in roots:
+        if exact and abs(v - round(v)) < 1e-9:
+            out.append(str(int(round(v))))
+        else:
+            out.append(("%." + str(dec) + "f") % v)
+    return out
 
 
 def verify_equation(eq_str, proof, precision=""):

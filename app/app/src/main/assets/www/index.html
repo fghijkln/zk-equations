@@ -115,7 +115,8 @@ const STR = {
     dec_l: "小数位数", btnSolve: "查看方程的解",
     solve_h: "数值求解，最多显示 5 个解（默认 8 位小数）。点击解可填入上方的解输入框，再设精确度生成证明。",
     noRoots: "在有意义区间内未找到实数解",
-    prec_l: "精确度分母 k", prec_h: "最终精度为 1/(k×10⁴)。严格含义：你知道的数与方程精确根相差小于此值，否则拒绝生成证明。含小数或超越函数（sin/cos/exp/ln，Chebyshev 逼近多项式）的方程需要填此项；小数最多 8 位。",
+    rootN: "解",
+    prec_l: "精确度分母 k", prec_h: "最终精度为 1/(k×10⁴)。严格含义：你知道的数与方程精确根相差小于此值，否则拒绝生成证明。含小数或超越函数（sin/cos/exp/ln，Chebyshev 逼近多项式）的方程需要填此项；小数最多 12 位。",
     prec_l2: "精确度分母 k", prec_h2: "最终精度为 1/(k×10⁴)（留空则按证明中记录的 k 验证）。",
     verify_h: "验证证明", verify_d: "任何人拿到方程和证明，都能确认方程成立——但无法得知解是多少。",
     proof_l: "证明（JSON）", btnVerify: "验证",
@@ -131,7 +132,8 @@ const STR = {
     dec_l: "Decimals", btnSolve: "Find roots",
     solve_h: "Numerically solve; shows up to 5 roots (8 decimals by default). Tap a root to fill the witness field above, then set precision and prove.",
     noRoots: "No real roots found in the meaningful interval",
-    prec_l: "Precision denominator k", prec_h: "Final precision is 1/(k×10⁴). Strict meaning: the number you know differs from the exact root by less than this, otherwise proving is refused. Required for equations with decimals or transcendental functions (sin/cos/exp/ln, Chebyshev approximation polynomials); decimals support 8 places.",
+    rootN: "Root",
+    prec_l: "Precision denominator k", prec_h: "Final precision is 1/(k×10⁴). Strict meaning: the number you know differs from the exact root by less than this, otherwise proving is refused. Required for equations with decimals or transcendental functions (sin/cos/exp/ln, Chebyshev approximation polynomials); decimals support 12 places.",
     prec_l2: "Precision denominator k", prec_h2: "Final precision is 1/(k×10⁴) (leave empty to use the k stored in the proof).",
     verify_h: "Verify", verify_d: "Anyone with the equation and the proof can confirm it holds — without learning the witness.",
     proof_l: "Proof (JSON)", btnVerify: "Verify",
@@ -192,7 +194,8 @@ document.getElementById("btnSolve").onclick = () => {
         } else {
           out.innerHTML = r.roots.map((rt, i) =>
             '<button class="ghost" data-root="' + escapeHtml(rt) + '">' +
-            (i + 1) + '. <span class="mono">' + escapeHtml(rt) + '</span></button>'
+            escapeHtml(STR[lang].rootN) + (i + 1) + '：<span class="mono">' +
+            escapeHtml(rt) + '</span></button>'
           ).join("");
           out.querySelectorAll("button[data-root]").forEach(b => {
             b.onclick = () => {
