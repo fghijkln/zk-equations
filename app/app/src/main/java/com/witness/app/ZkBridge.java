@@ -48,6 +48,16 @@ public class ZkBridge {
         }
     }
 
+    @JavascriptInterface
+    public String certificate(String proofJson) {
+        try {
+            PyObject r = api.callAttr("certificate", proofJson);
+            return r.toString();
+        } catch (Exception e) {
+            return "{\"ok\":false,\"error\":\"" + escape(String.valueOf(e)) + "\"}";
+        }
+    }
+
     private static String escape(String s) {
         return s.replace("\\", "\\\\")
                 .replace("\"", "\\\"")

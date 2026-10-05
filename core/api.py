@@ -115,6 +115,8 @@ def prove_equation(eq_str, witness, precision=""):
     proof = bulletproof.prove(circ, aL, aR, aO)
     proof["equation"] = circ.canonical
     proof["precision"] = circ.precision  # int k, or None in exact mode
+    proof["n"] = circ.n  # wires (power of two); lets readers replay challenges
+    proof["q"] = circ.q  # multiplication gates
     return proof
 
 
@@ -166,3 +168,19 @@ def verify_equation(eq_str, proof, precision=""):
         return bulletproof.verify(circ, proof)
     except (ValueError, KeyError, TypeError, AssertionError):
         return False
+
+
+def describe_proof(proof):
+    """Build a human-readable proof certificate (traditional math-proof
+    style: proposition / proof steps / verification / QED).
+
+    proof: proof dict as returned by prove_equation. Raises ValueError
+    on malformed proof. The witness never appears in the certificate.
+    """
+    from . import proof_text
+    if not isinstance(proof, dict):
+        raise ValueError("proof is not a dict")
+    for key in ("equation", "AI", "AO", "S", "T", "ipa"):
+        if key not in proof:
+            raise ValueError("malformed proof: missing %r" % key)
+    return proof_text.certificate(proof)

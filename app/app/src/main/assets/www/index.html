@@ -37,6 +37,26 @@
                  padding:9px; font-weight:400; }
   #proveOut, #verifyOut { margin-top:12px; font-size:14px; }
   #proofJson { font-size:11px; min-height:90px; color:#b9e6c8; }
+  /* Proof certificate: traditional math-proof typography */
+  .cert { font-family:Georgia,'Times New Roman',serif; font-size:14px;
+          line-height:1.65; color:#e8e4d8; background:rgba(255,255,255,.03);
+          border:1px solid #3a3a3a; border-radius:8px; padding:16px;
+          margin-top:10px; }
+  .cert .prop { border-left:3px solid var(--gold); padding:8px 12px;
+                margin:0 0 12px; font-style:italic; background:rgba(212,175,55,.06); }
+  .cert .prop b, .cert .pf b { font-style:normal; }
+  .cert .step { margin:10px 0; }
+  .cert .step .st { font-weight:700; }
+  .cert .math { font-family:'Times New Roman',serif; background:rgba(0,0,0,.25);
+                border-radius:6px; padding:8px 10px; margin:6px 0;
+                overflow-x:auto; white-space:nowrap; font-size:13px; }
+  .cert .vals { font-family:ui-monospace,monospace; font-size:11px;
+                color:#b9e6c8; margin:4px 0 4px 12px; line-height:1.7; }
+  .cert .note { font-size:12px; color:#9a9a9a; margin:2px 0 0 12px;
+                font-family:system-ui,sans-serif; }
+  .cert .checks { margin:12px 0 4px; padding:8px 12px;
+                  background:rgba(76,175,125,.07); border-radius:6px; }
+  .cert .qed { text-align:right; font-size:18px; margin-top:8px; }
   .verdict { text-align:center; font-size:26px; font-weight:800; padding:18px;
              border-radius:8px; margin-top:12px; }
   .verdict.ok { background:rgba(76,175,125,.14); color:var(--ok);
@@ -120,7 +140,9 @@ const STR = {
     prec_l2: "精确度分母 k", prec_h2: "最终精度为 1/(k×10⁴)（留空则按证明中记录的 k 验证）。",
     verify_h: "验证证明", verify_d: "任何人拿到方程和证明，都能确认方程成立——但无法得知解是多少。",
     proof_l: "证明（JSON）", btnVerify: "验证",
-    working: "计算中…", copy: "复制证明",
+    working: "计算中…", copy: "复制证明", cert: "查看证明书",
+    certProp: "命题", certProof: "证明", certVerify: "验证",
+    certHide: "收起证明书",
     pass: "✓ 验证通过", fail: "✗ 验证不通过",
     copied: "已复制", footer: "Bulletproofs 算术电路证明 · 纯 Python 实现，无需可信设置<br>学习级实现：数学真实，未经审计，请勿用于保护真实资产",
     errApi: "桥接不可用"
@@ -137,7 +159,9 @@ const STR = {
     prec_l2: "Precision denominator k", prec_h2: "Final precision is 1/(k×10⁴) (leave empty to use the k stored in the proof).",
     verify_h: "Verify", verify_d: "Anyone with the equation and the proof can confirm it holds — without learning the witness.",
     proof_l: "Proof (JSON)", btnVerify: "Verify",
-    working: "Computing…", copy: "Copy proof",
+    working: "Computing…", copy: "Copy proof", cert: "View certificate",
+    certProp: "Proposition", certProof: "Proof", certVerify: "Verification",
+    certHide: "Hide certificate",
     pass: "✓ VALID", fail: "✗ INVALID",
     copied: "Copied", footer: "Bulletproofs arithmetic-circuit proofs · pure Python, no trusted setup<br>Learning-grade: real math, not audited — do not protect real assets with it",
     errApi: "Bridge unavailable"
@@ -230,11 +254,28 @@ document.getElementById("btnProve").onclick = () => {
         out.innerHTML =
           '<label>' + STR[lang].proof_l + '</label>' +
           '<textarea id="proofJson" class="mono" readonly></textarea>' +
-          '<button class="ghost" id="btnCopy">' + STR[lang].copy + '</button>';
+          '<button class="ghost" id="btnCopy">' + STR[lang].copy + '</button>' +
+          '<button class="ghost" id="btnCert">' + STR[lang].cert + '</button>' +
+          '<div id="certOut"></div>';
         document.getElementById("proofJson").value = pj;
         document.getElementById("btnCopy").onclick = (e) => {
           navigator.clipboard.writeText(pj).catch(() => {});
           e.target.textContent = STR[lang].copied;
+        };
+        document.getElementById("btnCert").onclick = (e) => {
+          const co = document.getElementById("certOut");
+          if (co.innerHTML) { co.innerHTML = ""; e.target.textContent = STR[lang].cert; return; }
+          e.target.textContent = STR[lang].working;
+          setTimeout(() => {
+            try {
+              const cr = JSON.parse(api().certificate(pj));
+              if (cr.ok) { co.innerHTML = renderCert(cr.cert); e.target.textContent = STR[lang].certHide; }
+              else { co.innerHTML = '<div class="err">' + escapeHtml(cr.error) + '</div>'; e.target.textContent = STR[lang].cert; }
+            } catch (err) {
+              co.innerHTML = '<div class="err">' + escapeHtml(String(err)) + '</div>';
+              e.target.textContent = STR[lang].cert;
+            }
+          }, 30);
         };
       } else {
         out.innerHTML = '<div class="err">' + escapeHtml(r.error) + '</div>';
@@ -273,6 +314,26 @@ document.getElementById("btnVerify").onclick = () => {
 
 function escapeHtml(s) {
   return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+function renderCert(c) {
+  const t = (o) => escapeHtml(o[lang] || o.en);
+  let h = '<div class="cert">';
+  h += '<div class="prop"><b>' + STR[lang].certProp + '.</b> ' + t(c.proposition) + '<br><span style="font-style:normal;font-size:12px;color:#9a9a9a">' + t(c.stats_text) + '</span></div>';
+  h += '<div class="pf"><b>' + STR[lang].certProof + '.</b></div>';
+  c.steps.forEach((s) => {
+    h += '<div class="step"><span class="st">(' + s.num + ') ' + t(s.title) + '.</span>';
+    h += '<div class="math">' + escapeHtml(s.math) + '</div>';
+    if (s.values && s.values.length) {
+      h += '<div class="vals">' + s.values.map((v) => escapeHtml(v[0]) + ' = ' + escapeHtml(v[1])).join('<br>') + '</div>';
+    }
+    h += '<div class="note">' + t(s.note) + '</div></div>';
+  });
+  h += '<div class="checks"><b>' + STR[lang].certVerify + '.</b><br>' +
+       c.checks.map((x) => '✓ ' + t(x)).join('<br>') + '</div>';
+  h += '<div class="note">' + t(c.qed_note) + '</div>';
+  h += '<div class="qed">∎</div></div>';
+  return h;
 }
 applyLang();
 updatePrec();

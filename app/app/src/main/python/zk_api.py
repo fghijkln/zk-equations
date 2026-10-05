@@ -65,3 +65,21 @@ def solve(equation, decimals="8"):
     except Exception:
         return _err("solve failed: " + traceback.format_exc(limit=1).strip())
     return json.dumps({"ok": True, "roots": roots}, ensure_ascii=False)
+
+
+def certificate(proof_json):
+    """Render a proof as a human-readable certificate (math-proof style).
+
+    Returns {"ok": true, "cert": {...}} with bilingual prose.
+    """
+    try:
+        proof = json.loads(proof_json)
+    except (ValueError, TypeError):
+        return _err("proof is not valid JSON")
+    try:
+        cert = zk.describe_proof(proof)
+    except ValueError as e:
+        return _err(str(e))
+    except Exception:
+        return _err("certificate failed: " + traceback.format_exc(limit=1).strip())
+    return json.dumps({"ok": True, "cert": cert}, ensure_ascii=False)
