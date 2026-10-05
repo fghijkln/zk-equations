@@ -1,0 +1,12 @@
+Witness proves you know a solution to an equation — e.g. "I know x such that x^3+2x+5=38" — without revealing x.
+
+It uses Bulletproofs arithmetic-circuit proofs implemented in pure Python: no trusted setup, no pairings, fully on-device.
+
+Features:
+• Integer and decimal equations
+• Transcendental functions (sin/cos/exp/ln via Chebyshev approximation polynomials) with a strict precision guarantee — the witness must be within 1/(k·10⁴) of the exact root, checked before proving
+• Built-in numerical equation solver (up to 5 roots, adjustable decimals)
+
+Zero permissions: no internet access or any system permission required. Pure on-device computation.
+
+Learning-grade cryptography: the math is real but not audited. Do not use it to protect real assets.

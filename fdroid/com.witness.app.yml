@@ -2,16 +2,19 @@
 # This file is NOT read by F-Droid from our repo — submit its contents
 # as a merge request to https://gitlab.com/fdroid/fdroiddata (metadata/
 # com.witness.app.yml) when ready. Prepared 2026-10-05, following the
-# WebWeave MR !51050 pattern.
+# WebWeave MR !51050 pattern and the "App inclusion" MR template.
 #
-# Notes for the submitter:
+# Notes for the submitter (fill into the MR description checklist):
 # - License: MIT (see repo LICENSE). Zero permissions, no network.
-# - Chaquopy bundles the Python runtime: same "Reproducible Builds not
-#   established" situation as WebWeave (accepted there).
-# - UpdateCheckMode Tags + AutoUpdateMode Version: version detection is
-#   server-side from git tags; the app itself has no updater and needs
-#   none (no internet permission at all).
-# - Single ABI arm64-v8a (same as WebWeave).
+# - Fastlane metadata (title/summary/description/changelog, en-US) is in
+#   the upstream repo under fastlane/metadata/android/en-US/ — do NOT
+#   duplicate Summary/Description/Changelog in this YML (template rule).
+# - Reproducible Builds: not established — the Python runtime is bundled
+#   via Chaquopy (same situation as WebWeave, accepted there).
+# - abi split: not applicable — single ABI arm64-v8a.
+# - AutoUpdate: Tags + Version (server-side tag scan; the app itself has
+#   no updater and needs none — no internet permission at all).
+# - commit must be the FULL hash (template rule), not the tag.
 
 Categories:
   - Science & Education
@@ -22,22 +25,6 @@ SourceCode: https://github.com/fghijkln/zk-equations
 IssueTracker: https://github.com/fghijkln/zk-equations/issues
 
 AutoName: Witness
-Summary: Zero-knowledge proofs for arithmetic equations
-Description: |-
-  Witness proves you know a solution to an equation — e.g. "I know x such
-  that x³+2x+5=38" — without revealing x. It uses Bulletproofs
-  arithmetic-circuit proofs implemented in pure Python: no trusted setup,
-  no pairings, fully on-device.
-
-  Features: integer and decimal equations, transcendental functions
-  (sin/cos/exp/ln via Chebyshev approximation polynomials) with a strict
-  precision guarantee (witness within 1/(k·10⁴) of the exact root, enforced
-  before proving), and a built-in numerical equation solver.
-
-  Zero permissions: no internet access or any system permission required.
-
-  Learning-grade cryptography: the math is real but not audited. Do not
-  use it to protect real assets.
 
 UpdateCheckMode: Tags
 AutoUpdateMode: Version
@@ -47,7 +34,7 @@ CurrentVersionCode: 6
 Builds:
   - versionName: 0.4.1
     versionCode: 6
-    commit: v0.4.1
+    commit: 939a66a0b355142432a3011d7774a71b75ecb101
     subdir: app
     gradle:
       - yes

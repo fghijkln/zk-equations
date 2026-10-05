@@ -1,0 +1,3 @@
+• Solver–witness handoff fixes: exact equations return plain integers; witness decimal limit 12; clearer root numbering
+• Strict precision: witness must be within 1/(k·10⁴) of the exact root
+• Built-in numerical equation solver (Aberth-Ehrlich + Brent + Newton)
