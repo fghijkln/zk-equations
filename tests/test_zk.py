@@ -339,6 +339,55 @@ check("tolerance canonical kept as binding footnote",
 expect_raises("describe_proof rejects malformed proof",
               lambda: api.describe_proof({"equation": "x=1"}))
 
+# ---------------- 10. committed inputs (debug) ----------------
+# honest commit -> prove -> verify
+cc = api.commit_input("x^3 + 2*x + 5 = 38", 3)
+pc = api.prove_committed_equation("x^3 + 2*x + 5 = 38", 3, cc["gamma"])
+check("committed: V matches proof", pc["V"] == cc["V"])
+check("committed: honest verifies",
+      api.verify_committed_equation("x^3 + 2*x + 5 = 38", cc["V"], pc))
+# tolerance mode
+cct = api.commit_input("sin(x) = 0.5", "0.52359878", "1000")
+pct = api.prove_committed_equation("sin(x) = 0.5", "0.52359878",
+                                   cct["gamma"], "1000")
+check("committed tolerance verifies",
+      api.verify_committed_equation("sin(x) = 0.5", cct["V"], pct, "1000"))
+# negative witness
+ccn = api.commit_input("x^2 = 16", -4)
+pcn = api.prove_committed_equation("x^2 = 16", -4, ccn["gamma"])
+check("committed negative witness verifies",
+      api.verify_committed_equation("x^2 = 16", ccn["V"], pcn))
+# adversarial: swapped V
+check("committed: swapped V -> False",
+      api.verify_committed_equation("x^3 + 2*x + 5 = 38", cct["V"], pc) is False)
+# adversarial: base proof presented as committed
+pb = api.prove_equation("x^3 + 2*x + 5 = 38", 3)
+check("committed: base proof -> False",
+      api.verify_committed_equation("x^3 + 2*x + 5 = 38", cc["V"], pb) is False)
+# adversarial: committed proof presented to base verifier
+check("committed: proof via base verify -> False",
+      api.verify_equation("x^3 + 2*x + 5 = 38", pc) is False)
+# adversarial: tampered t_hat
+ptm = copy.deepcopy(pc)
+ptm["t_hat"] = "%064x" % ((int(ptm["t_hat"], 16) + 1) % 2**256)
+check("committed: tampered t_hat -> False",
+      api.verify_committed_equation("x^3 + 2*x + 5 = 38", cc["V"], ptm) is False)
+# adversarial: wrong gamma (does not open V)
+pwm = copy.deepcopy(pc)
+pwg = api.prove_committed_equation("x^3 + 2*x + 5 = 38", 3,
+                                   "%064x" % ((int(cc["gamma"], 16) + 1) % 2**256))
+check("committed: wrong gamma -> False",
+      api.verify_committed_equation("x^3 + 2*x + 5 = 38", cc["V"], pwg) is False)
+# adversarial: wrong equation
+check("committed: wrong equation -> False",
+      api.verify_committed_equation("x + 5 = 8", cc["V"], pc) is False)
+# certificate handles committed proofs
+certc = api.describe_proof(pc)
+check("committed certificate: valid=True",
+      certc["valid"] is True and certc["qed"] is True)
+check("committed certificate: notes the commitment",
+      certc["committed_note"] is not None)
+
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))
 if FAIL:

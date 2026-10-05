@@ -83,3 +83,55 @@ def certificate(proof_json):
     except Exception:
         return _err("certificate failed: " + traceback.format_exc(limit=1).strip())
     return json.dumps({"ok": True, "cert": cert}, ensure_ascii=False)
+
+
+# ---- committed inputs (debug/experimental) ----
+
+def commit(equation, witness, precision=""):
+    """Create a Pedersen commitment V to the equation's input wire.
+
+    Returns {"ok": true, "V": hex, "gamma": hex}. gamma must be kept
+    secret and passed to prove_committed.
+    """
+    try:
+        r = zk.commit_input(equation.strip(), witness.strip(),
+                            (precision or "").strip())
+    except ValueError as e:
+        return _err(str(e))
+    except Exception:
+        return _err("commit failed: " + traceback.format_exc(limit=1).strip())
+    return json.dumps({"ok": True, "V": r["V"], "gamma": r["gamma"]},
+                      ensure_ascii=False)
+
+
+def prove_committed(equation, witness, gamma, precision=""):
+    """Prove with the input wire publicly committed (see commit).
+
+    Returns {"ok": true, "proof": {...}}; the proof carries "V".
+    """
+    try:
+        proof = zk.prove_committed_equation(equation.strip(), witness.strip(),
+                                            (gamma or "").strip(),
+                                            (precision or "").strip())
+    except ValueError as e:
+        return _err(str(e))
+    except Exception:
+        return _err("prove failed: " + traceback.format_exc(limit=1).strip())
+    return json.dumps({"ok": True, "proof": proof}, ensure_ascii=False)
+
+
+def verify_committed(equation, V, proof_json, precision=""):
+    """Verify a committed-input proof against equation and V.
+
+    Returns {"ok": true, "valid": bool}.
+    """
+    try:
+        proof = json.loads(proof_json)
+    except (ValueError, TypeError):
+        return _err("proof is not valid JSON")
+    try:
+        valid = zk.verify_committed_equation(equation.strip(), (V or "").strip(),
+                                             proof, (precision or "").strip())
+    except Exception:
+        return _err("verify failed")
+    return json.dumps({"ok": True, "valid": bool(valid)}, ensure_ascii=False)

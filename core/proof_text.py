@@ -92,7 +92,11 @@ def certificate(proof):
                 check_ok["binding"] = False
             else:
                 check_ok["binding"] = True
-                v, detail = bulletproof.verify_detail(vcirc, proof)
+                # Committed-input proofs verify against their own V.
+                if "V" in proof:
+                    v, detail = bulletproof.verify_detail_committed(vcirc, proof)
+                else:
+                    v, detail = bulletproof.verify_detail(vcirc, proof)
                 for name, ok in detail:
                     check_ok[name] = bool(ok)
                 valid = bool(v)
@@ -112,6 +116,15 @@ def certificate(proof):
                    % (k, k * 10000))
 
     T = lambda zh, en: {"zh": zh, "en": en}
+
+    committed_note = None
+    if "V" in proof:
+        committed_note = T(
+            "承诺输入：x 被公开承诺为 V = %s（γ 保密），证明与该承诺绑定。"
+            % _trunc(proof["V"], 32),
+            "Committed input: x is publicly committed as V = %s (gamma kept "
+            "secret); the proof is bound to this commitment."
+            % _trunc(proof["V"], 32))
 
     steps = [
         {
@@ -225,6 +238,7 @@ def certificate(proof):
         "binding_note": T(
             "证明绑定到规范形：%s" % _short_eq(eq),
             "Proof bound to canonical form: %s" % _short_eq(eq)),
+        "committed_note": committed_note,
         "stats": {"n": n, "q": q, "rounds": rounds, "bytes": size},
         "stats_text": T(
             "电路：%d 条线，%s 个乘法门；证明 %d 字节" % (n, q_txt_zh, size),
