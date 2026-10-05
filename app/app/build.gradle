@@ -11,8 +11,8 @@ android {
         targetSdk 34
         // 版本号手写在这里（发版时同步改）；CI 会校验 versionName 与 git tag 一致，
         // 不一致则构建失败。
-        versionCode 8
-        versionName "0.4.3"
+        versionCode 9
+        versionName "5.0"
 
         ndk {
             // 只留 arm64
