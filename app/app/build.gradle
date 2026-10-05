@@ -20,8 +20,13 @@ android {
         }
 
         python {
-            // core/ 为纯标准库实现，零 pip 依赖
+            // core/ 为纯标准库实现；curve_ext 是 debug^2 分支的 C 扩展
+            //（constant-time 曲线运算），通过 pip 从源码编译进 APK。
             version "3.11"
+            pip {
+                // 本地路径：core/cext/setup.py（Chaquopy 会用 Android NDK 编译）
+                install "../../core/cext"
+            }
         }
     }
 

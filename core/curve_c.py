@@ -1,20 +1,29 @@
 """Curve API with C acceleration (debug/experimental).
 
-Tries the constant-time C extension (core.cext.curve_ext); falls back to the
-pure-Python implementation if the extension is not built. The two are
+Tries the constant-time C extension; falls back to the pure-Python
+implementation if the extension is not available. The two are
 byte-identical (verified by core/cext/test_differential.py).
+
+Import order:
+  1. `import curve_ext` -- pip-installed (Chaquopy Android build).
+  2. `from .cext import curve_ext` -- local `setup.py build_ext --inplace`.
+  3. Pure Python fallback.
 
 NUMS generators (H, U, Gvec, Hvec, hash_to_curve) stay in Python: they run
 once at startup on public data and are not secret-dependent.
 """
 from . import curve as _py
 
+_c = None
 try:
-    from .cext import curve_ext as _c
-    USING_C = True
+    import curve_ext as _c  # Chaquopy pip install (Android)
 except ImportError:
-    _c = None
-    USING_C = False
+    try:
+        from .cext import curve_ext as _c  # local inplace build
+    except ImportError:
+        _c = None
+
+USING_C = _c is not None
 
 if USING_C:
     P = _py.P  # field prime (C module only exports N, G, INF)
