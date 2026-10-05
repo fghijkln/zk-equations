@@ -78,6 +78,38 @@ jobs:
           ls -lh app/app/src/main/python/curve_ext.so
           file app/app/src/main/python/curve_ext.so
 
+      # debug^3: Rust + Zig backends (plain C ABI via ctypes, no Python.h).
+      # Only runs on branches with core/rsext / core/zigext.
+      - name: Cross-compile Rust backend for Android
+        if: hashFiles('core/rsext/src/lib.rs') != ''
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export NDK=$ANDROID_HOME/ndk/26.1.10909125
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup target add aarch64-linux-android
+          mkdir -p core/rsext/.cargo
+          cat > core/rsext/.cargo/config.toml <<EOF
+          [target.aarch64-linux-android]
+          linker = "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          EOF
+          cd core/rsext && cargo build --release --target aarch64-linux-android
+          cp target/aarch64-linux-android/release/libcurve_rs.so \
+             ../../app/app/src/main/python/libcurve_rs.so
+          file ../../app/app/src/main/python/libcurve_rs.so
+
+      - name: Cross-compile Zig backend for Android
+        if: hashFiles('core/zigext/curve.zig') != ''
+        run: |
+          ZIGV=0.15.1
+          curl -sSL -o /tmp/zig.tar.xz \
+            "https://ziglang.org/download/${ZIGV}/zig-x86_64-linux-${ZIGV}.tar.xz"
+          tar -xf /tmp/zig.tar.xz -C /tmp
+          /tmp/zig-x86_64-linux-${ZIGV}/zig build-lib core/zigext/curve.zig \
+            -dynamic -target aarch64-linux-android -O ReleaseFast \
+            -femit-bin=app/app/src/main/python/libcurve_zig.so
+          file app/app/src/main/python/libcurve_zig.so
+
       # 增量构建：缓存 Gradle 发行版与全部依赖下载
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

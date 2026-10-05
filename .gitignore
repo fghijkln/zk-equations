@@ -9,3 +9,7 @@ app/app/src/main/python/core/
 core/cext/build/
 core/cext/*.so
 core/cext/*.o
+core/rsext/target/
+core/zigext/*.so
+core/nbext/*.so
+app/app/src/main/python/*.so
