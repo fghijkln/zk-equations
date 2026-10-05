@@ -43,7 +43,7 @@ error e != 0 with <e, 1^n> = 0).
 
 import secrets
 
-from . import curve
+from . import curve_c as curve
 from . import ipa
 from .transcript import Transcript
 

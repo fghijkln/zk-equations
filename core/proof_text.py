@@ -12,7 +12,7 @@ recompiled from proof["equation"]); the witness never appears.
 
 from . import bulletproof
 from . import circuit as circuit_mod
-from . import curve
+from . import curve_c as curve
 from . import transcript as transcript_mod
 
 

@@ -43,7 +43,7 @@ proofs; genuinely different equations do not.
 
 from fractions import Fraction
 
-from . import curve
+from . import curve_c as curve
 
 N = curve.N
 

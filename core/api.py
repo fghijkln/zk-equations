@@ -20,7 +20,7 @@ from fractions import Fraction
 
 from . import bulletproof
 from . import circuit as circuit_mod
-from . import curve as curve_mod
+from . import curve_c as curve_mod
 from . import solve as solve_mod
 
 M_DEC = circuit_mod.M_DEC
