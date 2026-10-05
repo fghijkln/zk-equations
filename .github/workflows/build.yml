@@ -43,13 +43,13 @@ jobs:
           export ANDROID_HOME=/usr/local/lib/android/sdk
           export NDK=$ANDROID_HOME/ndk/26.1.10909125
           export CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          # Python 3.11 headers: use Chaquopy's if available, else system
-          # (pyconfig.h is the platform-specific part; Android arm64 and
-          # Linux x86_64 are both LP64 little-endian, so this works for
-          # our limited C API usage)
-          sudo apt-get update -qq && sudo apt-get install -y -qq python3.11-dev > /dev/null
+          # Python headers for the C API (pyconfig.h is platform-specific,
+          # but Android arm64 and Linux x86_64 are both LP64 little-endian;
+          # our usage is limited to stable C API calls).
+          PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+          sudo apt-get update -qq && sudo apt-get install -y -qq python${PYVER}-dev > /dev/null
           $CC -shared -fPIC -O2 -std=c99 -Wall \
-            -I/usr/include/python3.11 \
+            -I/usr/include/python${PYVER} \
             -DANDROID \
             core/cext/curve_ext.c \
             -o app/app/src/main/python/curve_ext.so
