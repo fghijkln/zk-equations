@@ -7,7 +7,7 @@ Domain separation prefix for every hash: b"zkeq-bp-v1".
 
 import hashlib
 
-from . import curve
+from . import curve_c as curve
 
 DOMAIN = b"zkeq-bp-v1"
 

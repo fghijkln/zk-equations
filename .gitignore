@@ -4,3 +4,8 @@ __pycache__/
 
 # Staged by Gradle (stagePythonCore) from ../../core at build time
 app/app/src/main/python/core/
+
+# C extension build artifacts
+core/cext/build/
+core/cext/*.so
+core/cext/*.o

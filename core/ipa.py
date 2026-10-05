@@ -24,7 +24,7 @@ Non-interactive via the Fiat-Shamir transcript (paper Section 4.4).
 n must be a power of two (the circuit compiler pads to this).
 """
 
-from . import curve
+from . import curve_c as curve
 
 
 def _dot(a, b):

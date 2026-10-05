@@ -4,7 +4,7 @@ Commitment: C = v*G + r*H, with H a NUMS generator (discrete log of H
 w.r.t. G unknown), hence computationally binding and perfectly hiding.
 """
 
-from . import curve
+from . import curve_c as curve
 
 
 def commit(value, blind):

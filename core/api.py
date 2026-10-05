@@ -20,10 +20,12 @@ from fractions import Fraction
 
 from . import bulletproof
 from . import circuit as circuit_mod
+from . import curve_c as curve_mod
 from . import solve as solve_mod
 
 M_DEC = circuit_mod.M_DEC
 WIT_DECIMALS = 12  # witness: up to 12 decimal places (solver max)
+N = curve_mod.N
 
 
 def _parse_witness_full(w):
@@ -69,6 +71,100 @@ def _check_precision(eq_str, w_frac, k):
     return best
 
 
+def _witness_field(eq_str, witness, precision=""):
+    """Compile and validate `witness`, returning (circ, w) where w is
+    the integer the circuit evaluates (wire 0 gets w mod N). The
+    commitment value is always v = w % N. Shared by prove, commit and
+    prove_committed so all three see the same value. Raises ValueError
+    like prove_equation on bad input."""
+    circ = circuit_mod.compile(eq_str, precision)
+    if circ.mode == "exact":
+        if isinstance(witness, int):
+            w = witness
+        else:
+            s = str(witness).strip()
+            try:
+                fr = Fraction(s)
+            except (ValueError, ZeroDivisionError):
+                fr = None
+            if fr is not None and fr.denominator == 1:
+                w = int(fr)
+            else:
+                raise ValueError(
+                    "witness must be an integer for this exact equation; "
+                    "for a decimal witness, write the equation with decimals "
+                    "(e.g. x^5 = 1.0) and set precision k")
+        if not circ.check_witness(w):
+            raise ValueError("witness does not satisfy the equation")
+    else:
+        w_frac = _parse_witness_full(witness)
+        _check_precision(eq_str, w_frac, circ.precision)
+        w = _quantize(w_frac)
+        if not circ.check_witness(w):
+            raise ValueError(
+                "witness does not satisfy within 1/%d" % circ.precision)
+    return circ, w
+
+
+def commit_input(eq_str, witness, precision=""):
+    """Create a Pedersen commitment to the equation's input wire.
+
+    V = G_0^v * H^gamma, where v = w % N is the field element the
+    circuit uses for aL[0] and gamma is fresh randomness. Returns
+    {"V": hex, "gamma": hex}. The witness must satisfy the equation
+    (same refusal rules as prove_equation); gamma must be kept secret
+    and passed to prove_committed_equation.
+    """
+    _, w = _witness_field(eq_str, witness, precision)
+    v = w % N
+    gamma = bulletproof._rand()
+    V = curve_mod.add(curve_mod.mul(v, curve_mod.Gvec(0)),
+                      curve_mod.mul(gamma, curve_mod.H()))
+    return {"V": curve_mod.compress(V).hex(), "gamma": "%064x" % gamma}
+
+
+def prove_committed_equation(eq_str, witness, gamma_hex, precision=""):
+    """Prove knowledge of `witness` satisfying `eq_str`, bound to the
+    public commitment V = G_0^v * H^gamma.
+
+    gamma_hex: the blinding from commit_input (hex). The proof carries
+    "V"; verify_committed_equation checks the proof against V.
+    Raises ValueError on bad input (same rules as prove_equation).
+    """
+    circ, w = _witness_field(eq_str, witness, precision)
+    try:
+        gamma = int(gamma_hex, 16)
+    except (ValueError, TypeError):
+        raise ValueError("gamma must be 64-hex")
+    if not 0 < gamma < N:
+        raise ValueError("gamma out of range")
+    aL, aR, aO = circ.evaluate(w)
+    assert circ.check_constraints(aL, aR, aO), "compiler bug: bad witness wires"
+    assert aL[0] % N == w % N, "compiler bug: wire 0 is not the witness"
+    proof = bulletproof.prove_committed(circ, aL, aR, aO, gamma)
+    proof["equation"] = circ.canonical
+    proof["precision"] = circ.precision
+    proof["n"] = circ.n
+    proof["q"] = circ.q
+    proof["input"] = eq_str.strip()
+    return proof
+
+
+def verify_committed_equation(eq_str, V_hex, proof, precision=""):
+    """Verify a committed-input proof against equation and commitment V.
+    Returns True/False. proof["V"] must equal V_hex."""
+    if not isinstance(proof, dict) or proof.get("V") != V_hex:
+        return False
+    k = str(precision).strip() or proof.get("precision")
+    try:
+        circ = circuit_mod.compile(eq_str, k if k is not None else "")
+    except ValueError:
+        return False
+    if proof.get("equation") != circ.canonical:
+        return False
+    return bulletproof.verify_committed(circ, proof)
+
+
 def prove_equation(eq_str, witness, precision=""):
     """Prove knowledge of `witness` satisfying `eq_str`.
 
@@ -81,36 +177,8 @@ def prove_equation(eq_str, witness, precision=""):
     Raises ValueError if the equation is malformed, the precision is
     missing/invalid, or the witness does not satisfy (within precision).
     """
-    circ = circuit_mod.compile(eq_str, precision)
-    if circ.mode == "exact":
-        if isinstance(witness, int):
-            w = witness
-        else:
-            s = str(witness).strip()
-            try:
-                fr = Fraction(s)
-            except (ValueError, ZeroDivisionError):
-                fr = None
-            if fr is not None and fr.denominator == 1:
-                # "3", "3.0", "3.0000000000" (e.g. tapped from the
-                # solver) are all the integer 3
-                w = int(fr)
-            else:
-                raise ValueError(
-                    "witness must be an integer for this exact equation; "
-                    "for a decimal witness, write the equation with decimals "
-                    "(e.g. x^5 = 1.0) and set precision k")
-        if not circ.check_witness(w):
-            raise ValueError("witness does not satisfy the equation")
-        aL, aR, aO = circ.evaluate(w)
-    else:
-        w_frac = _parse_witness_full(witness)
-        _check_precision(eq_str, w_frac, circ.precision)
-        X = _quantize(w_frac)
-        if not circ.check_witness(X):
-            raise ValueError(
-                "witness does not satisfy within 1/%d" % circ.precision)
-        aL, aR, aO = circ.evaluate(X)
+    circ, w = _witness_field(eq_str, witness, precision)
+    aL, aR, aO = circ.evaluate(w)
     assert circ.check_constraints(aL, aR, aO), "compiler bug: bad witness wires"
     proof = bulletproof.prove(circ, aL, aR, aO)
     proof["equation"] = circ.canonical

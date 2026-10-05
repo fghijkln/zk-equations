@@ -58,6 +58,38 @@ public class ZkBridge {
         }
     }
 
+    // ---- committed inputs (debug/experimental) ----
+
+    @JavascriptInterface
+    public String commit(String equation, String witness, String precision) {
+        try {
+            PyObject r = api.callAttr("commit", equation, witness, precision);
+            return r.toString();
+        } catch (Exception e) {
+            return "{\"ok\":false,\"error\":\"" + escape(String.valueOf(e)) + "\"}";
+        }
+    }
+
+    @JavascriptInterface
+    public String proveCommitted(String equation, String witness, String gamma, String precision) {
+        try {
+            PyObject r = api.callAttr("prove_committed", equation, witness, gamma, precision);
+            return r.toString();
+        } catch (Exception e) {
+            return "{\"ok\":false,\"error\":\"" + escape(String.valueOf(e)) + "\"}";
+        }
+    }
+
+    @JavascriptInterface
+    public String verifyCommitted(String equation, String v, String proofJson, String precision) {
+        try {
+            PyObject r = api.callAttr("verify_committed", equation, v, proofJson, precision);
+            return r.toString();
+        } catch (Exception e) {
+            return "{\"ok\":false,\"error\":\"" + escape(String.valueOf(e)) + "\"}";
+        }
+    }
+
     private static String escape(String s) {
         return s.replace("\\", "\\\\")
                 .replace("\"", "\\\"")

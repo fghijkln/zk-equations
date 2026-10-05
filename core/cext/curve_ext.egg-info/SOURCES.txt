@@ -1,0 +1,8 @@
+curve_ext.c
+pyproject.toml
+setup.py
+test_differential.py
+curve_ext.egg-info/PKG-INFO
+curve_ext.egg-info/SOURCES.txt
+curve_ext.egg-info/dependency_links.txt
+curve_ext.egg-info/top_level.txt

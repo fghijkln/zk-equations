@@ -124,6 +124,34 @@
   <div id="verifyOut"></div>
 </div>
 
+<div class="card" style="border-style:dashed">
+  <h2 id="t_cmt_h"></h2>
+  <p class="desc" id="t_cmt_d"></p>
+  <label id="t_cmt_eq_l"></label>
+  <input type="text" id="ceq" value="x^3 + 2*x + 5 = 38" autocapitalize="off"
+         autocomplete="off" spellcheck="false">
+  <label id="t_cmt_wit_l"></label>
+  <input type="password" id="cwit" placeholder="3" inputmode="decimal"
+         autocomplete="off">
+  <div id="precRow3" style="display:none">
+    <label id="t_cmt_prec_l"></label>
+    <input type="number" id="cprec" value="1000" min="1" step="1" inputmode="numeric">
+  </div>
+  <button id="btnCommit"></button>
+  <div id="commitOut"></div>
+  <button id="btnProveC" style="display:none"></button>
+  <div id="proveCOut"></div>
+  <div style="margin-top:12px">
+    <label id="t_cmt_V2_l"></label>
+    <input type="text" id="cV2" class="mono" autocapitalize="off"
+           autocomplete="off" spellcheck="false" placeholder="V (hex)">
+    <label id="t_cmt_proof_l"></label>
+    <textarea id="cproofIn" class="mono" spellcheck="false"></textarea>
+    <button id="btnVerifyC"></button>
+    <div id="verifyCOut"></div>
+  </div>
+</div>
+
 <footer id="t_footer"></footer>
 
 <script>
@@ -145,7 +173,13 @@ const STR = {
     certHide: "收起证明书",
     pass: "✓ 验证通过", fail: "✗ 验证不通过",
     copied: "已复制", footer: "Bulletproofs 算术电路证明 · 纯 Python 实现，无需可信设置<br>学习级实现：数学真实，未经审计，请勿用于保护真实资产",
-    errApi: "桥接不可用"
+    errApi: "桥接不可用",
+    cmt_h: "🔬 承诺输入（调试）", cmt_d: "实验功能：先把解承诺为公开值 V（V = G₀ˣ·H^γ），再证明"承诺的值满足方程"。验证者拿到方程、V 和证明即可验证，全程不知 x 与 γ。",
+    cmt_eq_l: "方程", cmt_wit_l: "解（保密）", cmt_prec_l: "精确度分母 k",
+    btnCommit: "1. 生成承诺", btnProveC: "2. 生成证明", btnVerifyC: "3. 验证",
+    cmt_V_l: "公开承诺 V", cmt_gamma_l: "盲因子 γ（保密，仅证明时用一次）",
+    cmt_proof_l: "证明（JSON，含 V）", cmt_V2_l: "公开承诺 V",
+    committedNote: "承诺输入"
   },
   en: {
     tagline: "Zero-knowledge proofs for equations · prove you know x, without revealing it",
@@ -164,7 +198,13 @@ const STR = {
     certHide: "Hide certificate",
     pass: "✓ VALID", fail: "✗ INVALID",
     copied: "Copied", footer: "Bulletproofs arithmetic-circuit proofs · pure Python, no trusted setup<br>Learning-grade: real math, not audited — do not protect real assets with it",
-    errApi: "Bridge unavailable"
+    errApi: "Bridge unavailable",
+    cmt_h: "🔬 Committed input (debug)", cmt_d: "Experimental: first commit the witness as a public value V (V = G₀ˣ·H^γ), then prove "the committed value satisfies the equation". Anyone with the equation, V and the proof can verify, learning neither x nor γ.",
+    cmt_eq_l: "Equation", cmt_wit_l: "Witness (secret)", cmt_prec_l: "Precision denominator k",
+    btnCommit: "1. Commit", btnProveC: "2. Prove", btnVerifyC: "3. Verify",
+    cmt_V_l: "Public commitment V", cmt_gamma_l: "Blinding γ (secret, used once for proving)",
+    cmt_proof_l: "Proof (JSON, includes V)", cmt_V2_l: "Public commitment V",
+    committedNote: "Committed input"
   }
 };
 let lang = "zh";
@@ -178,6 +218,9 @@ function applyLang() {
   document.getElementById("btnProve").textContent = t.btnProve;
   document.getElementById("btnVerify").textContent = t.btnVerify;
   document.getElementById("btnSolve").textContent = t.btnSolve;
+  document.getElementById("btnCommit").textContent = t.btnCommit;
+  document.getElementById("btnProveC").textContent = t.btnProveC;
+  document.getElementById("btnVerifyC").textContent = t.btnVerifyC;
   document.getElementById("lang").textContent = lang === "zh" ? "EN" : "中文";
 }
 document.getElementById("lang").onclick = () => {
@@ -312,6 +355,114 @@ document.getElementById("btnVerify").onclick = () => {
   }, 30);
 };
 
+// ---- committed inputs (debug) ----
+let cGamma = "";
+document.getElementById("ceq").addEventListener("input", () => {
+  document.getElementById("precRow3").style.display =
+    needsTol(document.getElementById("ceq").value) ? "" : "none";
+});
+document.getElementById("btnCommit").onclick = () => {
+  const out = document.getElementById("commitOut");
+  const btn = document.getElementById("btnCommit");
+  out.innerHTML = ""; btn.disabled = true;
+  btn.textContent = STR[lang].working;
+  setTimeout(() => {
+    try {
+      const r = JSON.parse(api().commit(
+        document.getElementById("ceq").value,
+        document.getElementById("cwit").value,
+        needsTol(document.getElementById("ceq").value)
+          ? document.getElementById("cprec").value : ""));
+      if (r.ok) {
+        cGamma = r.gamma;
+        out.innerHTML =
+          '<label>' + STR[lang].cmt_V_l + '</label>' +
+          '<textarea class="mono" readonly>' + escapeHtml(r.V) + '</textarea>' +
+          '<label>' + STR[lang].cmt_gamma_l + '</label>' +
+          '<textarea class="mono" readonly>' + escapeHtml(r.gamma) + '</textarea>';
+        document.getElementById("btnProveC").style.display = "";
+        document.getElementById("cV2").value = r.V;
+      } else {
+        out.innerHTML = '<div class="err">' + escapeHtml(r.error) + '</div>';
+      }
+    } catch (e) {
+      out.innerHTML = '<div class="err">' + escapeHtml(String(e)) + '</div>';
+    }
+    btn.disabled = false; btn.textContent = STR[lang].btnCommit;
+  }, 30);
+};
+document.getElementById("btnProveC").onclick = () => {
+  const out = document.getElementById("proveCOut");
+  const btn = document.getElementById("btnProveC");
+  out.innerHTML = ""; btn.disabled = true;
+  btn.textContent = STR[lang].working;
+  setTimeout(() => {
+    try {
+      const r = JSON.parse(api().proveCommitted(
+        document.getElementById("ceq").value,
+        document.getElementById("cwit").value,
+        cGamma,
+        needsTol(document.getElementById("ceq").value)
+          ? document.getElementById("cprec").value : ""));
+      if (r.ok) {
+        const pj = JSON.stringify(r.proof);
+        out.innerHTML =
+          '<label>' + STR[lang].cmt_proof_l + '</label>' +
+          '<textarea id="cproofJson" class="mono" readonly></textarea>' +
+          '<button class="ghost" id="btnCertC">' + STR[lang].cert + '</button>' +
+          '<div id="certCOut"></div>';
+        document.getElementById("cproofJson").value = pj;
+        document.getElementById("cproofIn").value = pj;
+        document.getElementById("btnCertC").onclick = (e) => {
+          const co = document.getElementById("certCOut");
+          if (co.innerHTML) { co.innerHTML = ""; e.target.textContent = STR[lang].cert; return; }
+          e.target.textContent = STR[lang].working;
+          setTimeout(() => {
+            try {
+              const cr = JSON.parse(api().certificate(pj));
+              if (cr.ok) { co.innerHTML = renderCert(cr.cert); e.target.textContent = STR[lang].certHide; }
+              else { co.innerHTML = '<div class="err">' + escapeHtml(cr.error) + '</div>'; e.target.textContent = STR[lang].cert; }
+            } catch (err) {
+              co.innerHTML = '<div class="err">' + escapeHtml(String(err)) + '</div>';
+              e.target.textContent = STR[lang].cert;
+            }
+          }, 30);
+        };
+      } else {
+        out.innerHTML = '<div class="err">' + escapeHtml(r.error) + '</div>';
+      }
+    } catch (e) {
+      out.innerHTML = '<div class="err">' + escapeHtml(String(e)) + '</div>';
+    }
+    btn.disabled = false; btn.textContent = STR[lang].btnProveC;
+  }, 30);
+};
+document.getElementById("btnVerifyC").onclick = () => {
+  const out = document.getElementById("verifyCOut");
+  const btn = document.getElementById("btnVerifyC");
+  out.innerHTML = ""; btn.disabled = true;
+  btn.textContent = STR[lang].working;
+  setTimeout(() => {
+    try {
+      const r = JSON.parse(api().verifyCommitted(
+        document.getElementById("ceq").value,
+        document.getElementById("cV2").value,
+        document.getElementById("cproofIn").value,
+        needsTol(document.getElementById("ceq").value)
+          ? document.getElementById("cprec").value : ""));
+      if (r.ok) {
+        out.innerHTML = '<div class="verdict ' + (r.valid ? "ok" : "bad") + '">' +
+          (r.valid ? STR[lang].pass : STR[lang].fail) + '</div>';
+      } else {
+        out.innerHTML = '<div class="err">' + escapeHtml(r.error) + '</div>';
+      }
+    } catch (e) {
+      out.innerHTML = '<div class="err">' + escapeHtml(String(e)) + '</div>';
+    }
+    btn.disabled = false; btn.textContent = STR[lang].btnVerifyC;
+  }, 30);
+};
+
 function escapeHtml(s) {
   return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
@@ -322,7 +473,11 @@ function renderCert(c) {
   let h = '<div class="cert">';
   h += '<div class="verdict ' + (c.valid === true ? "ok" : "bad") + '" style="font-size:15px;padding:10px">' +
        t(c.verdict) + '</div>';
-  h += '<div class="prop"><b>' + STR[lang].certProp + '.</b> ' + t(c.proposition) + '<br><span style="font-style:normal;font-size:12px;color:#9a9a9a">' + t(c.stats_text) + '<br>' + t(c.binding_note) + '</span></div>';
+  h += '<div class="prop"><b>' + STR[lang].certProp + '.</b> ' + t(c.proposition) + '<br><span style="font-style:normal;font-size:12px;color:#9a9a9a">' + t(c.stats_text) + '<br>' + t(c.binding_note) + '</span>';
+  if (c.committed_note) {
+    h += '<br><span style="font-style:normal;font-size:13px;color:#c9a227">🔬 ' + t(c.committed_note) + '</span>';
+  }
+  h += '</div>';
   h += '<div class="pf"><b>' + STR[lang].certProof + '.</b></div>';
   c.steps.forEach((s) => {
     h += '<div class="step"><span class="st">(' + s.num + ') ' + t(s.title) + '.</span>';
