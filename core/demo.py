@@ -49,12 +49,13 @@ def main():
     print("term-moved 'x^3 + 2*x = 33' verifies: %s (must be True)" % ok3)
     assert ok3
 
-    # Transcendental equation: sin(x) = 0.5, precision 1/1000.
+    # Transcendental equation: sin(x) = 0.5, precision 1/(1000*10^4).
     print()
-    print("equation : sin(x) = 0.5   (precision k = 1000, i.e. 1/1000)")
-    print("witness  : x = 0.5236  (kept secret from the verifier)")
+    print("equation : sin(x) = 0.5   (precision k = 1000, i.e. 1/(k*10^4))")
+    w = api.solve_equation("sin(x) = 0.5", decimals=8)[0]
+    print("witness  : x = %s  (kept secret from the verifier)" % w)
     t0 = time.time()
-    proof2 = api.prove_equation("sin(x) = 0.5", "0.5236", "1000")
+    proof2 = api.prove_equation("sin(x) = 0.5", w, "1000")
     t_prove2 = time.time() - t0
     print("prove    : %.2fs" % t_prove2)
     print("proof size: %d bytes JSON" % len(json.dumps(proof2)))

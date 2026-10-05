@@ -50,3 +50,18 @@ def verify(equation, proof_json, precision=""):
     except Exception:
         return _err("verify failed")
     return json.dumps({"ok": True, "valid": bool(valid)}, ensure_ascii=False)
+
+
+def solve(equation, decimals="8"):
+    """Numerically solve `equation`; return up to 5 real roots.
+
+    decimals: digits after the point per root (default 8).
+    Returns {"ok": true, "roots": ["0.52359878", ...]}.
+    """
+    try:
+        roots = zk.solve_equation(equation.strip(), (decimals or "8").strip())
+    except ValueError as e:
+        return _err(str(e))
+    except Exception:
+        return _err("solve failed: " + traceback.format_exc(limit=1).strip())
+    return json.dumps({"ok": True, "roots": roots}, ensure_ascii=False)

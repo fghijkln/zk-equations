@@ -36,9 +36,13 @@ Two proving modes, chosen automatically:
 - **Exact.** Integer polynomial equations are proved exactly (mod the
   secp256k1 group order).
 - **Tolerance.** Equations with decimals or transcendental functions
-  need a precision denominator `k` (final precision `1/k`). Values use
-  4 fixed decimal places; the circuit proves `|T(x) − y| < 1/k`, where
-  `T` is the equation's polynomial — for transcendental functions,
+  need a precision denominator `k`. Strict definition: **the witness
+  must be within `1/(k·10⁴)` of an exact root** — the prover
+  numerically solves the equation and refuses (no proof) if the
+  witness is farther away. Witnesses support up to 8 decimal places.
+  The circuit itself works in 4 fixed decimal places and proves
+  `|T(x) − y| < 1/k`, where `T` is the equation's polynomial — for
+  transcendental functions,
   their fixed **Chebyshev-interpolation polynomial** (near-minimax; per
   Trefethen, strictly better than Taylor at the same degree, and the
   consensus choice in the ZK literature, e.g. Kurik & Laud IACR
@@ -48,6 +52,12 @@ Two proving modes, chosen automatically:
   (it needs division/comparisons); outside the interval the proof stays
   valid but is about the polynomial, not the true function. ln is only
   meaningful on [1, 2] (singular at 0 — hard restriction).
+
+- **Solver.** The app has a "find roots" button: pure-Python numerical
+  solver (Aberth–Ehrlich simultaneous iteration + Brent bracketing +
+  Newton polish, zero dependencies), shows up to 5 real roots in the
+  meaningful interval, 8 decimals by default (1–12 selectable). Tap a
+  root to use it as the witness. `api.solve_equation(eq, decimals=8)`.
 
 Proofs are bound to the **canonical** equation (polynomial normal
 form, with `k` for tolerance mode), also hashed into the Fiat–Shamir

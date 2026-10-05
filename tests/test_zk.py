@@ -182,7 +182,10 @@ check("scaled (different poly) still fails",
 # ---------------- 7. tolerance mode: decimals & transcendental ----------------
 
 t0 = time.time()
-pt = api.prove_equation("sin(x) = 0.5", "0.5236", "1000")
+# witnesses come from the solver (8 decimals), as the strict precision
+# 1/(k*10^4) requires
+w_sin = api.solve_equation("sin(x) = 0.5", decimals=8)[0]
+pt = api.prove_equation("sin(x) = 0.5", w_sin, "1000")
 tpt = time.time() - t0
 t0 = time.time()
 okt = api.verify_equation("sin(x) = 0.5", pt, "1000")
@@ -203,16 +206,40 @@ check("decimal x=0.5 verifies", api.verify_equation("x = 0.5", pdec, "1000"))
 expect_raises("decimal bad witness refused",
               lambda: api.prove_equation("x = 0.5", "0.6", "1000"))
 
-pexp = api.prove_equation("exp(x) = 2.7183", "1.0", "1000")
+pexp = api.prove_equation("exp(x) = 2.7183",
+                         api.solve_equation("exp(x) = 2.7183", decimals=8)[0],
+                         "1000")
 check("exp(x)=2.7183 verifies",
       api.verify_equation("exp(x) = 2.7183", pexp, "1000"))
-pln = api.prove_equation("ln(x) = 0.6931", "2.0", "1000")
+pln = api.prove_equation("ln(x) = 0.6931",
+                        api.solve_equation("ln(x) = 0.6931", decimals=8)[0],
+                        "1000")
 check("ln(x)=0.6931 @1/1000 verifies",
       api.verify_equation("ln(x) = 0.6931", pln, "1000"))
 # Chebyshev on [1,2] is accurate at x=2 (Taylor-12 was ~0.04 off there)
-pcheb = api.prove_equation("cos(x) = 0.5", "1.0472", "1000")
+pcheb = api.prove_equation("cos(x) = 0.5",
+                           api.solve_equation("cos(x) = 0.5", decimals=8)[1],
+                           "1000")
 check("cos(x)=0.5 @1/1000 verifies",
       api.verify_equation("cos(x) = 0.5", pcheb, "1000"))
+
+# strict precision: witness must be within 1/(k*10^4) of an exact root
+expect_raises("4-decimal witness now refused (not within 1/(k*10^4))",
+              lambda: api.prove_equation("sin(x) = 0.5", "0.5236", "1000"))
+expect_raises("9-decimal witness refused",
+              lambda: api.prove_equation("sin(x) = 0.5", "0.523598776",
+                                        "1000"))
+# solver: accuracy + display
+sr = api.solve_equation("x^2 = 2", decimals=8)
+check("solver x^2=2 -> +-1.41421356",
+      sr == ["-1.41421356", "1.41421356"])
+sr5 = api.solve_equation("(x-1)*(x-2)*(x-3)*(x-4)*(x-5)*(x-6) = 0",
+                         decimals=8)
+check("solver shows at most 5 roots", len(sr5) == 5 and sr5[0] == "1.00000000")
+check("solver no real roots -> []",
+      api.solve_equation("x^2 + 1 = 0", decimals=8) == [])
+check("solver double root -> single 0.00000000",
+      api.solve_equation("x^2 = 0", decimals=8) == ["0.00000000"])
 
 # tampering with the embedded precision must fail (k falls back to the
 # proof's own value, so the canonical form mismatches)

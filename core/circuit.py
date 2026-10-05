@@ -19,14 +19,22 @@ ln is singular at 0: it is only meaningful on [1, 2] (hard restriction).
 Two modes, chosen automatically:
   exact:     the equation is an integer polynomial (no decimals, no
              transcendental functions). Proved exactly, mod n.
-  tolerance: decimals or transcendental functions present. Values use
-             4 fixed decimal places (integers = value * 10^4); the user
-             supplies a precision denominator k and the circuit proves
+  tolerance: decimals or transcendental functions present. The user
+             supplies a precision denominator k with the strict meaning:
+                 the witness is within 1/(k*10^4) of an exact root,
+             enforced by the prover (numerical solve + distance check;
+             a bad witness is refused, never proven). The circuit itself
+             works in 4 fixed decimal places (integers = value * 10^4;
+             the witness is quantized to 4 places) and proves
                  |P(X)| <= B   i.e.   |T(x) - y| < 1/k,
              where P is the scaled integer polynomial, B = ceil(S/k)-1,
              S the scale factor. |X| <= 5*10^4 is range-checked so the
              mod-n arithmetic faithfully represents integer arithmetic.
              |P(X)| <= B is enforced by bit-decomposing u = P(X)+B.
+             (Why not 1/(k*10^4) in-circuit? An 8-decimal witness needs
+             a 10^8 scale; the Chebyshev coefficients' tiny high-degree
+             terms would underflow the field. The distance guarantee is
+             an honest-prover property, checked before proving.)
 
 Proofs are bound to the *canonical* equation (polynomial normal form),
 so "x^3+2*x+5=38" and the term-moved "x^3+2*x=33" verify each other's

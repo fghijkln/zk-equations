@@ -38,6 +38,16 @@ public class ZkBridge {
         }
     }
 
+    @JavascriptInterface
+    public String solve(String equation, String decimals) {
+        try {
+            PyObject r = api.callAttr("solve", equation, decimals);
+            return r.toString();
+        } catch (Exception e) {
+            return "{\"ok\":false,\"error\":\"" + escape(String.valueOf(e)) + "\"}";
+        }
+    }
+
     private static String escape(String s) {
         return s.replace("\\", "\\\\")
                 .replace("\"", "\\\"")
