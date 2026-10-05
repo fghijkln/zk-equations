@@ -10,6 +10,7 @@ The certificate is derived from the proof dict alone (the circuit is
 recompiled from proof["equation"]); the witness never appears.
 """
 
+from . import bulletproof
 from . import circuit as circuit_mod
 from . import curve
 from . import transcript as transcript_mod
@@ -76,7 +77,31 @@ def certificate(proof):
         except (ValueError, KeyError):
             challenges = None
     size = len(json.dumps(proof).encode("utf-8"))
-    eq_short = _short_eq(eq)
+
+    # ---- internal verification: a certificate is not a validity claim.
+    # Recompile from the user's original input (parseable, unlike the
+    # rational-coefficient canonical form) and run the real verifier.
+    input_eq = proof.get("input")
+    valid = None
+    check_ok = {}
+    if input_eq:
+        try:
+            vcirc = circuit_mod.compile(input_eq, k if k is not None else "")
+            if vcirc.canonical != eq:
+                valid = False
+                check_ok["binding"] = False
+            else:
+                check_ok["binding"] = True
+                v, detail = bulletproof.verify_detail(vcirc, proof)
+                for name, ok in detail:
+                    check_ok[name] = bool(ok)
+                valid = bool(v)
+        except (ValueError, KeyError, TypeError, AssertionError):
+            valid = None
+
+    # Proposition shows what the user typed; the canonical binding is a
+    # footnote. (Canonical Chebyshev forms are unreadable.)
+    eq_display = input_eq if input_eq else _short_eq(eq)
 
     if k is None:
         prec_zh = "精确方程：witness 为整数"
@@ -168,21 +193,38 @@ def certificate(proof):
     ]
 
     checks = [
-        T("g^t̂·h^τ_x = g^{δ·x²}·∏T_i^{xⁱ}（多项式恒等式）",
-          "g^t̂·h^τ_x = g^{δ·x²}·∏T_i^{xⁱ} (polynomial identity)"),
-        T("内积论证接受：承诺 P 打开为 (a, b)，且 a·b = t̂",
-          "Inner-product argument accepts: commitment P opens to (a, b) "
-          "with a·b = t̂"),
+        {"text": T("g^t̂·h^τ_x = g^{δ·x²}·∏T_i^{xⁱ}（多项式恒等式）",
+                   "g^t̂·h^τ_x = g^{δ·x²}·∏T_i^{xⁱ} (polynomial identity)"),
+         "ok": check_ok.get("poly")},
+        {"text": T("内积论证接受：承诺 P 打开为 (a, b)，且 a·b = t̂",
+                   "Inner-product argument accepts: commitment P opens to (a, b) "
+                   "with a·b = t̂"),
+         "ok": check_ok.get("ipa")},
     ]
 
     q_txt_zh = str(q) if q is not None else "?"
     q_txt_en = str(q) if q is not None else "unknown"
+    if valid is True:
+        verdict = T("以下验证全部通过。", "All checks below pass.")
+    elif valid is False:
+        verdict = T("⚠ 该证明验证不通过——证书仅展示其结构，不代表证明有效。",
+                    "⚠ This proof does NOT verify — the certificate shows its "
+                    "structure only, not validity.")
+    else:
+        verdict = T("⚠ 无法重编译电路，未验证该证明——请自行验证后再采信。",
+                    "⚠ Could not recompile the circuit; this proof was not "
+                    "verified — verify it yourself before trusting it.")
     return {
+        "valid": valid,
+        "verdict": verdict,
         "proposition": T(
             "证明者知道 x，使得 %s 成立（%s），"
-            "且 x 的值不被透露。" % (eq_short, prec_zh),
+            "且 x 的值不被透露。" % (eq_display, prec_zh),
             "The prover knows x satisfying %s (%s), "
-            "without revealing x." % (eq_short, prec_en)),
+            "without revealing x." % (eq_display, prec_en)),
+        "binding_note": T(
+            "证明绑定到规范形：%s" % _short_eq(eq),
+            "Proof bound to canonical form: %s" % _short_eq(eq)),
         "stats": {"n": n, "q": q, "rounds": rounds, "bytes": size},
         "stats_text": T(
             "电路：%d 条线，%s 个乘法门；证明 %d 字节" % (n, q_txt_zh, size),
@@ -192,8 +234,14 @@ def certificate(proof):
         "checks": checks,
         "qed_note": T(
             "以上各式皆成立，故验证者确信证明者知道满足方程的 x，"
-            "而 x 本身在证明中从未出现。",
+            "而 x 本身在证明中从未出现。"
+            if valid is True else
+            "由于验证未通过，此处没有证毕——上式仅为待验证的断言。",
             "All checks hold; the verifier is convinced the prover knows "
             "an x satisfying the equation, while x itself never appears "
-            "in the proof."),
+            "in the proof."
+            if valid is True else
+            "Verification failed, so there is no QED — the above remains "
+            "an unverified claim."),
+        "qed": valid is True,
     }

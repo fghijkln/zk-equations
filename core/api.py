@@ -117,6 +117,7 @@ def prove_equation(eq_str, witness, precision=""):
     proof["precision"] = circ.precision  # int k, or None in exact mode
     proof["n"] = circ.n  # wires (power of two); lets readers replay challenges
     proof["q"] = circ.q  # multiplication gates
+    proof["input"] = eq_str.strip()  # user's original spelling, for display
     return proof
 
 
@@ -176,6 +177,12 @@ def describe_proof(proof):
 
     proof: proof dict as returned by prove_equation. Raises ValueError
     on malformed proof. The witness never appears in the certificate.
+
+    The certificate verifies the proof internally: ``cert["valid"]``
+    is True/False (None when the circuit cannot be recompiled, e.g.
+    legacy proofs), ``cert["checks"]`` carries per-check results, and
+    the QED mark is only meaningful when valid is True. Seeing a
+    certificate is NOT seeing a valid proof.
     """
     from . import proof_text
     if not isinstance(proof, dict):

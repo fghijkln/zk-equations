@@ -204,8 +204,15 @@ def prove(circuit, aL, aR, aO):
     }
 
 
-def verify(circuit, proof):
-    """Verify a proof dict against the circuit. Returns True/False."""
+def verify_detail(circuit, proof):
+    """Verify a proof dict against the circuit.
+
+    Returns (valid, checks) where checks is a list of
+    (name, passed): "poly" (polynomial identity) and "ipa"
+    (inner-product argument). A malformed proof yields
+    (False, checks-so-far).
+    """
+    checks = []
     try:
         n, Q = circuit.n, circuit.q
         gvec = [curve.Gvec(i) for i in range(n)]
@@ -275,8 +282,10 @@ def verify(circuit, proof):
         rhs = curve.mul((delta_yz * xpow[2]) % N, g)
         for i in (1, 3, 4, 5, 6):
             rhs = curve.add(rhs, curve.mul(xpow[i], Ts[i]))
-        if lhs != rhs:
-            return False
+        ok_poly = (lhs == rhs)
+        checks.append(("poly", ok_poly))
+        if not ok_poly:
+            return False, checks
 
         # check (b): inner-product argument
         hp = [curve.mul(y_neg_n[i], hvec[i]) for i in range(n)]
@@ -288,6 +297,14 @@ def verify(circuit, proof):
         Pvef = curve.add(Pvef, _vec_commit(_add_vec(_scale(x, wL), wO), hp))
         Pip = curve.add(Pvef, curve.mul((N - mu) % N, h))
         ipa_proof = ipa.from_jsonable(proof["ipa"])
-        return ipa.verify(gvec, hp, curve.U(), Pip, t_hat, ipa_proof, tr)
+        ok_ipa = bool(ipa.verify(gvec, hp, curve.U(), Pip, t_hat, ipa_proof, tr))
+        checks.append(("ipa", ok_ipa))
+        return ok_ipa, checks
     except (ValueError, KeyError, TypeError, AssertionError):
-        return False
+        return False, checks
+
+
+def verify(circuit, proof):
+    """Verify a proof dict against the circuit. Returns True/False."""
+    valid, _ = verify_detail(circuit, proof)
+    return valid

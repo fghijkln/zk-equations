@@ -318,8 +318,11 @@ function escapeHtml(s) {
 
 function renderCert(c) {
   const t = (o) => escapeHtml(o[lang] || o.en);
+  const mark = (ok) => ok === true ? "✓" : ok === false ? "✗" : "?";
   let h = '<div class="cert">';
-  h += '<div class="prop"><b>' + STR[lang].certProp + '.</b> ' + t(c.proposition) + '<br><span style="font-style:normal;font-size:12px;color:#9a9a9a">' + t(c.stats_text) + '</span></div>';
+  h += '<div class="verdict ' + (c.valid === true ? "ok" : "bad") + '" style="font-size:15px;padding:10px">' +
+       t(c.verdict) + '</div>';
+  h += '<div class="prop"><b>' + STR[lang].certProp + '.</b> ' + t(c.proposition) + '<br><span style="font-style:normal;font-size:12px;color:#9a9a9a">' + t(c.stats_text) + '<br>' + t(c.binding_note) + '</span></div>';
   h += '<div class="pf"><b>' + STR[lang].certProof + '.</b></div>';
   c.steps.forEach((s) => {
     h += '<div class="step"><span class="st">(' + s.num + ') ' + t(s.title) + '.</span>';
@@ -330,9 +333,9 @@ function renderCert(c) {
     h += '<div class="note">' + t(s.note) + '</div></div>';
   });
   h += '<div class="checks"><b>' + STR[lang].certVerify + '.</b><br>' +
-       c.checks.map((x) => '✓ ' + t(x)).join('<br>') + '</div>';
+       c.checks.map((x) => mark(x.ok) + ' ' + t(x.text)).join('<br>') + '</div>';
   h += '<div class="note">' + t(c.qed_note) + '</div>';
-  h += '<div class="qed">∎</div></div>';
+  h += '<div class="qed">' + (c.qed ? '∎' : '<span style="color:var(--bad)">✗</span>') + '</div></div>';
   return h;
 }
 applyLang();
