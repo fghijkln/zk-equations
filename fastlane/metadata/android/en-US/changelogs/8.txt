@@ -1,0 +1,3 @@
+• Proof certificate verifies internally: shows validity verdict and per-check results; QED only for valid proofs
+• Certificate proposition shows your original input; canonical form moved to a binding footnote
+• verify_detail() exposes per-check results (polynomial identity / inner-product argument)
