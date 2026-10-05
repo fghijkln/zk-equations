@@ -16,4 +16,6 @@ setup(
             extra_compile_args=["-O2", "-std=c99", "-Wall"],
         )
     ],
+    # C extension only; don't package the test file or __pycache__
+    py_modules=[],
 )

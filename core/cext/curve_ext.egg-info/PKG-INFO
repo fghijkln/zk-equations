@@ -1,0 +1,5 @@
+Metadata-Version: 2.1
+Name: curve-ext
+Version: 0.1.0
+Summary: Constant-time secp256k1 group operations (debug/experimental)
+Requires-Python: >=3.8
