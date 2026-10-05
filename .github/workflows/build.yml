@@ -66,6 +66,9 @@ jobs:
           #define HAVE_LONG_LONG 1
           #define HAVE_SSIZE_T 1
           #define PY_FORMAT_SIZE_T "z"
+          #define HAVE_PTHREAD_H 1
+          #define HAVE_PTHREAD_ATFORK 1
+          #define _REENTRANT 1
           EOF
           $CC -shared -fPIC -O2 -std=c99 -Wall \
             -I/tmp/pyinclude \
