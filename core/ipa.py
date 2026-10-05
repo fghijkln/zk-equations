@@ -1,15 +1,15 @@
 """Improved inner-product argument (Bulletproofs paper, Section 3).
 
-Protocol 2 proves the relation
+Protocol 2 proves the paper's relation (2):
     P = g^a * h^b   and   <a, b> = c
 i.e. knowledge of vectors with a given inner product, where P carries
-NO u^c term. (This differs from the paper's relation (1), which is
-P = g^a*h^b*u^c; the circuit protocol in bulletproof.py hands us a P
-without the u^c factor, so the reduction below is adapted accordingly.)
+no u^c term -- exactly as in the paper. (Relation (1),
+P = g^a*h^b*u^{<a,b>}, is what the inner Protocol 1 proves.)
 
-Reduction (sound variant of the paper's Protocol 2): verifier sends
-w <- Z_p^* (after P and the scalar c are fixed in the transcript);
-both compute P' = P * u^{w*c}, u' = u^w; then Protocol 1 proves
+Reduction (the paper's Protocol 2, implemented unchanged): verifier
+sends w <- Z_p^* (after P and the scalar c are fixed in the
+transcript); both compute P' = P * u^{w*c}, u' = u^w; then
+Protocol 1 proves relation (1):
     P' = g^a * h^b * u'^{<a,b>}.
 Soundness: P' = g^a*h^b*u^{w*c} matches g^a*h^b*(u^w)^{<a,b>} iff
 w*c = w*<a,b> iff c = <a,b> (w != 0). Since P and c are fixed before
@@ -123,8 +123,7 @@ def prove(g, h, u, P, c, a, b, tr):
     tr.append_scalar("ip1-c", c)
     w = tr.challenge("ip1-w")
     # P' = P * u^{w*c}; run Protocol 1 with blinding generator u' = u^w.
-    # NOTE: this is intentionally NOT the paper's P' -- the paper's
-    # relation (1) carries an extra u^c in P, ours doesn't (see above).
+    # This is the paper's Protocol 2 reduction, implemented unchanged.
     P2 = curve.add(P, curve.mul((w * c) % curve.N, u))
     return prove_relation2(g, h, curve.mul(w, u), P2, a, b, tr)
 

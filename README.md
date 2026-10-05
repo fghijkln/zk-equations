@@ -15,6 +15,19 @@ an arithmetic circuit (multiplication gates + linear constraints), then proved.
 **Honesty note.** This is a learning-grade implementation: the math is real, but the
 code has not been audited. Do not use it to protect real assets.
 
+**Known limitations.**
+- *No side-channel resistance.* Blinding factors use `secrets` (CSPRNG),
+  but the curve arithmetic itself is plain Python big-int code — CPython's
+  integer ops, branches and allocations are not constant-time, so timing
+  attacks are not defended against. This is an architectural property of
+  "pure standard-library Python", not a bug to be fixed here.
+- *Transcendental domain.* Chebyshev interpolation is only faithful inside
+  its interval (e.g. sin/cos on [−π, π]); the solver searches |x| ≤ 5, so
+  the band [π, 5] is a gray zone where the polynomial has "run away" and
+  grows no roots there. Empirically (9 equations, 13 roots) nothing escapes,
+  but that is measurement, not a proof — treat out-of-interval witnesses
+  with suspicion.
+
 ## Layout
 
 - `core/` — pure-Python ZK core: curve ops, Pedersen commitments, inner-product
@@ -69,7 +82,7 @@ proofs; genuinely different equations do not.
 
 ```bash
 python3 -m core.demo
-python3 -m tests.test_zk   # 60 tests: correctness + tamper resistance
+python3 -m tests.test_zk   # 90 tests: correctness + tamper resistance + certificate
 ```
 
 ```python

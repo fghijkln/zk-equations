@@ -284,6 +284,61 @@ pt5 = api.prove_equation("x^5 = 1.0", "1.0", "1000")
 check("x^5=1.0 @1/1000 verifies",
       api.verify_equation("x^5 = 1.0", pt5, "1000"))
 
+# ---------------- 9. proof certificate (describe_proof) ----------------
+# valid proof -> valid cert with QED
+pc = api.prove_equation("x^3 + 2*x + 5 = 38", 3)
+cert = api.describe_proof(pc)
+check("certificate of valid proof: valid=True",
+      cert["valid"] is True)
+check("certificate of valid proof: qed=True",
+      cert["qed"] is True)
+check("certificate checks all pass",
+      [c["ok"] for c in cert["checks"]] == [True, True])
+check("certificate proposition shows user input",
+      "x^3 + 2*x + 5 = 38" in cert["proposition"]["zh"])
+# JSON-serializable
+json.dumps(cert)
+check("certificate is JSON-serializable", True)
+
+# tampered t_hat -> invalid, no QED, short-circuit [False, None]
+ptc = copy.deepcopy(pc)
+ptc["t_hat"] = "%064x" % ((int(ptc["t_hat"], 16) + 1) % 2**256)
+cert_t = api.describe_proof(ptc)
+check("tampered t_hat -> valid=False",
+      cert_t["valid"] is False)
+check("tampered t_hat -> qed=False (no QED)",
+      cert_t["qed"] is False)
+check("tampered t_hat -> checks [False, None] (short-circuit)",
+      [c["ok"] for c in cert_t["checks"]] == [False, None])
+
+# input swapped to another equation -> binding fails -> valid=False
+pbc = copy.deepcopy(pc)
+pbc["input"] = "x + 5 = 8"
+cert_b = api.describe_proof(pbc)
+check("swapped input -> valid=False (binding)",
+      cert_b["valid"] is False)
+
+# legacy proof (no input field) -> valid=None, not False
+plc = copy.deepcopy(pc)
+del plc["input"]
+cert_l = api.describe_proof(plc)
+check("legacy proof (no input) -> valid=None",
+      cert_l["valid"] is None)
+
+# tolerance mode: proposition shows user input, canonical as footnote
+pct = api.prove_equation("sin(x) = 0.5", "0.52359878", "1000")
+cert_tol = api.describe_proof(pct)
+check("tolerance cert valid=True",
+      cert_tol["valid"] is True)
+check("tolerance proposition shows user input",
+      "sin(x) = 0.5" in cert_tol["proposition"]["zh"])
+check("tolerance canonical kept as binding footnote",
+      "13611596267" in cert_tol["binding_note"]["zh"])
+
+# malformed proof still raises
+expect_raises("describe_proof rejects malformed proof",
+              lambda: api.describe_proof({"equation": "x=1"}))
+
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))
 if FAIL:
