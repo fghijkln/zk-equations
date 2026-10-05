@@ -55,3 +55,13 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 }
+
+// The ZK core is pure Python in ../../core (repo root). F-Droid builds
+// from a clean checkout and never runs our CI workflow, so stage it
+// into Chaquopy's source dir here, before anything else runs.
+def stageCore = tasks.register('stagePythonCore', Copy) {
+    from '../../core'
+    include '*.py'
+    into 'src/main/python/core'
+}
+tasks.named('preBuild') { dependsOn stageCore }

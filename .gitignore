@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# Staged by Gradle (stagePythonCore) from ../../core at build time
+app/app/src/main/python/core/

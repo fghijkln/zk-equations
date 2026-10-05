@@ -1,0 +1,53 @@
+# F-Droid inclusion metadata DRAFT for Witness (com.witness.app).
+# This file is NOT read by F-Droid from our repo — submit its contents
+# as a merge request to https://gitlab.com/fdroid/fdroiddata (metadata/
+# com.witness.app.yml) when ready. Prepared 2026-10-05, following the
+# WebWeave MR !51050 pattern.
+#
+# Notes for the submitter:
+# - License: MIT (see repo LICENSE). Zero permissions, no network.
+# - Chaquopy bundles the Python runtime: same "Reproducible Builds not
+#   established" situation as WebWeave (accepted there).
+# - UpdateCheckMode Tags + AutoUpdateMode Version: version detection is
+#   server-side from git tags; the app itself has no updater and needs
+#   none (no internet permission at all).
+# - Single ABI arm64-v8a (same as WebWeave).
+
+Categories:
+  - Science & Education
+License: MIT
+AuthorName: fghijkln
+WebSite: https://github.com/fghijkln/zk-equations
+SourceCode: https://github.com/fghijkln/zk-equations
+IssueTracker: https://github.com/fghijkln/zk-equations/issues
+
+AutoName: Witness
+Summary: Zero-knowledge proofs for arithmetic equations
+Description: |-
+  Witness proves you know a solution to an equation — e.g. "I know x such
+  that x³+2x+5=38" — without revealing x. It uses Bulletproofs
+  arithmetic-circuit proofs implemented in pure Python: no trusted setup,
+  no pairings, fully on-device.
+
+  Features: integer and decimal equations, transcendental functions
+  (sin/cos/exp/ln via Chebyshev approximation polynomials) with a strict
+  precision guarantee (witness within 1/(k·10⁴) of the exact root, enforced
+  before proving), and a built-in numerical equation solver.
+
+  Zero permissions: no internet access or any system permission required.
+
+  Learning-grade cryptography: the math is real but not audited. Do not
+  use it to protect real assets.
+
+UpdateCheckMode: Tags
+AutoUpdateMode: Version
+CurrentVersion: 0.4.1
+CurrentVersionCode: 6
+
+Builds:
+  - versionName: 0.4.1
+    versionCode: 6
+    commit: v0.4.1
+    subdir: app
+    gradle:
+      - yes

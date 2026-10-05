@@ -38,12 +38,9 @@ jobs:
         with:
           gradle-version: 8.7
 
-      # ZK 核心是纯 Python：构建前拷进 Chaquopy 的 python 源码目录
-      - name: Stage Python core
-        run: |
-          mkdir -p app/app/src/main/python/core
-          cp core/*.py app/app/src/main/python/core/
-          ls app/app/src/main/python/core/
+      # ZK 核心由 Gradle 的 stagePythonCore 任务在 preBuild 时拷进
+      # Chaquopy 目录（F-Droid 从干净 checkout 构建也需要它，
+      # 不能只放在 CI workflow 里）。
 
       # 桥接一致性检查：JS 调 WitnessApi.xxx() 必须在 Java 有
       # @JavascriptInterface 方法，Java callAttr("yyy") 必须在
