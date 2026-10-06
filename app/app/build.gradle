@@ -59,17 +59,16 @@ android {
 }
 
 // The ZK core is pure Python in ../../core (repo root). F-Droid builds
-// from a clean checkout and never runs our CI workflow, so stage it
-// into Chaquopy's source dir here, before anything else runs.
-// (Plain project.copy in doLast: avoids Gradle 8's strict Copy-task
-// input/output validation on the Chaquopy source dir.)
-tasks.register('stagePythonCore') {
-    doLast {
-        copy {
-            from '../../core'
-            include '*.py'
-            into 'src/main/python/core'
-        }
-    }
+// from a clean checkout and never runs our CI workflow, so it must be
+// staged into Chaquopy's source dir by Gradle itself.
+// IMPORTANT: the copy runs at *configuration* time, not inside a task.
+// Chaquopy's mergeReleasePythonSources runs BEFORE preBuild (verified in
+// CI logs), so an execution-time copy hooked to preBuild lands too late
+// and core/ never makes it into app.imy -- this broke 0.4.2/0.4.3/5.0
+// (crash on launch: `from core import api` fails). Configuration-time
+// copy is incremental (only changed files), so the cost is negligible.
+copy {
+    from '../../core'
+    include '*.py'
+    into 'src/main/python/core'
 }
-tasks.named('preBuild') { dependsOn 'stagePythonCore' }

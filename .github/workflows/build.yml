@@ -116,9 +116,10 @@ jobs:
         with:
           gradle-version: 8.7
 
-      # ZK 核心由 Gradle 的 stagePythonCore 任务在 preBuild 时拷进
-      # Chaquopy 目录（F-Droid 从干净 checkout 构建也需要它，
-      # 不能只放在 CI workflow 里）。
+      # ZK 核心由 app/app/build.gradle 在配置期拷进 Chaquopy 目录
+      #（F-Droid 从干净 checkout 构建也需要它，不能只放在 CI workflow 里；
+      # 注意不能用 preBuild 时的任务来拷：Chaquopy 的 merge*PythonSources
+      # 跑在 preBuild 之前，那样拷进去的文件进不了 app.imy）。
 
       # 桥接一致性检查：JS 调 WitnessApi.xxx() 必须在 Java 有
       # @JavascriptInterface 方法，Java callAttr("yyy") 必须在
