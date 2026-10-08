@@ -1,0 +1,1 @@
+v0.4.2: Enable R8 code shrinking with keep rules for the Chaquopy Python bridge.
