@@ -383,58 +383,74 @@ class Parser:
         return _psub(lhs, rhs)  # normalize: LHS - RHS = 0
 
     def parse_ode(self):
-        """Parse ode(y' = <rhs>, y(0) = <val>, deg = <d>).
+        """Parse ode(<diffeq>, <ic1>, ..., deg = <d>).
+        <diffeq> is a general equation <expr> = <expr> where expr is a
+        polynomial in x and y^(ord) (y, y', y'', ...), linear in y.
+        <ic> is y^(ord)(0) = <val> for ord = 0..n-1 (n = ODE order).
         Returns a placeholder poly; stores spec in self.ode_spec.
-        RHS is a bivariate polynomial in (x, y), linear in y.
         """
         if self.ode_spec is not None:
             raise ValueError("only one ode(...) per equation")
         self.next()  # consume 'ode'
         if self.next().kind != Tok.LP:
             raise ValueError("expected '(' after 'ode'")
-        # y' =
-        if self.next().kind != Tok.Y:
-            raise ValueError("ode must start with y' = ...")
-        if self.next().kind != Tok.PRIME:
-            raise ValueError("ode must start with y' = ... (missing ')")
+        # Differential equation: <expr> = <expr> (general form, not
+        # forced into y' = ...). Both sides are polynomials in x and
+        # y derivatives, linear in y.
+        lhs = self._parse_bivariate()
         if self.next().kind != Tok.EQ:
-            raise ValueError("expected '=' after y'")
-        # RHS: bivariate polynomial in x and y, linear in y.
-        # Parse using a simple recursive descent for bivariate.
+            raise ValueError("differential equation must contain '='")
         rhs = self._parse_bivariate()
+        # diffeq = lhs - rhs as {(ex, ord): coeff}
+        diffeq = {}
+        for k, c in lhs.items():
+            diffeq[k] = diffeq.get(k, Fraction(0)) + c
+        for k, c in rhs.items():
+            diffeq[k] = diffeq.get(k, Fraction(0)) - c
+        diffeq = {k: c for k, c in diffeq.items() if c != 0}
         if self.next().kind != Tok.COMMA:
-            raise ValueError("expected ',' after ODE right-hand side")
-        # y(0) = <val>
-        if self.next().kind != Tok.Y:
-            raise ValueError("expected y(0) = <value>")
-        if self.next().kind != Tok.LP:
-            raise ValueError("expected '(' after y")
-        # The initial point must be 0 (for now; y(a) with a!=0 is future work).
-        t0 = self.next()
-        if t0.kind != Tok.INT or t0.val != 0:
-            raise ValueError("only y(0) = <value> supported (initial point must be 0)")
-        if self.next().kind != Tok.RP:
-            raise ValueError("expected ')' after y(0")
-        if self.next().kind != Tok.EQ:
-            raise ValueError("expected '=' after y(0)")
-        # Value: INT or FLOAT (possibly negative)
-        neg = False
-        tv = self.next()
-        if tv.kind == Tok.MINUS:
-            neg = True
+            raise ValueError("expected ',' after differential equation")
+        # Initial conditions: y^(ord)(0) = <val>, one per ord 0..n-1.
+        # Parse until we see 'deg'.
+        ics = {}  # ord -> Fraction
+        while True:
+            t = self.peek()
+            if t.kind == Tok.IDENT and t.val == "deg":
+                break
+            # y^(ord)(0) = <val>
+            if self.next().kind != Tok.Y:
+                raise ValueError("expected y^(ord)(0) = <value>")
+            ord_ = 0
+            while self.peek() and self.peek().kind == Tok.PRIME:
+                self.next()
+                ord_ += 1
+            if self.next().kind != Tok.LP:
+                raise ValueError("expected '(' after y")
+            t0 = self.next()
+            if t0.kind != Tok.INT or t0.val != 0:
+                raise ValueError("only y(0) supported (initial point must be 0)")
+            if self.next().kind != Tok.RP:
+                raise ValueError("expected ')' after y(0")
+            if self.next().kind != Tok.EQ:
+                raise ValueError("expected '=' after y(0)")
+            neg = False
             tv = self.next()
-        if tv.kind == Tok.INT:
-            ic_val = Fraction(-tv.val if neg else tv.val)
-        elif tv.kind == Tok.FLOAT:
-            ic_val = -tv.val if neg else tv.val
-        else:
-            raise ValueError("initial value must be a number")
-        if self.next().kind != Tok.COMMA:
-            raise ValueError("expected ',' after initial condition")
+            if tv.kind == Tok.MINUS:
+                neg = True
+                tv = self.next()
+            if tv.kind == Tok.INT:
+                v = Fraction(-tv.val if neg else tv.val)
+            elif tv.kind == Tok.FLOAT:
+                v = -tv.val if neg else tv.val
+            else:
+                raise ValueError("initial value must be a number")
+            if ord_ in ics:
+                raise ValueError("duplicate initial condition for y^(%d)" % ord_)
+            ics[ord_] = v
+            if self.next().kind != Tok.COMMA:
+                raise ValueError("expected ',' after initial condition")
         # deg = <d>
-        td = self.next()
-        if not (td.kind == Tok.IDENT and td.val == "deg"):
-            raise ValueError("expected deg = <n>")
+        self.next()  # consume 'deg'
         if self.next().kind != Tok.EQ:
             raise ValueError("expected '=' after deg")
         tn = self.next()
@@ -443,29 +459,36 @@ class Parser:
         deg = tn.val
         if self.next().kind != Tok.RP:
             raise ValueError("expected ')' at end of ode(...)")
-        # Separate RHS into a(x)*y + b(x). Reject nonlinear in y.
-        a_poly = {}  # {exp: Fraction} for a(x)
-        b_poly = {}  # {exp: Fraction} for b(x)
-        for (ex, ey), coeff in rhs.items():
-            if ey == 1:
-                a_poly[ex] = a_poly.get(ex, Fraction(0)) + coeff
-            elif ey == 0:
-                b_poly[ex] = b_poly.get(ex, Fraction(0)) + coeff
-            else:
+        # Determine ODE order (max ord with y factor).
+        order = 0
+        for (ex, ord_) in diffeq.keys():
+            if ord_ >= 0 and ord_ > order:
+                order = ord_
+        # Need ICs for ord 0..order-1. (Order 0 means algebraic, not ODE.)
+        if order == 0:
+            raise ValueError("not a differential equation (no y' found)")
+        for j in range(order):
+            if j not in ics:
                 raise ValueError(
-                    "only linear ODEs supported (y^%d not allowed)" % ey)
+                    "missing initial condition for y^(%d)(0)" % j)
+        # Reject nonlinear terms (ey>1). In our representation, each term
+        # is (ex, ord) with a single y^(ord) factor; products of y's would
+        # have been caught as ey>1 in the old scheme. Here, _parse_bivariate
+        # already rejects y*y (see below).
         # Store spec; return dummy poly (Circuit uses spec directly).
         self.ode_spec = {
-            'a_poly': a_poly,
-            'b_poly': b_poly,
-            'ic_val': ic_val,
+            'diffeq': diffeq,  # {(ex, ord): coeff}, ord=-1 for pure x
+            'order': order,
+            'ics': ics,  # {ord: Fraction}
             'deg': deg,
         }
         return {0: _c(0)}  # dummy; not used
 
     def _parse_bivariate(self):
-        """Parse a bivariate polynomial in x and y.
-        Returns {(ex, ey): Fraction}. Stops at COMMA, RP, or EQ.
+        """Parse a bivariate polynomial in x and y derivatives.
+        Returns {(ex, ord): Fraction} where ord=-1 means no y factor
+        (pure x term), ord>=0 means x^ex * y^(ord).
+        Stops at COMMA, RP, or EQ. Rejects nonlinear y terms.
         """
         result = {}
         # Handle leading minus
@@ -475,7 +498,7 @@ class Parser:
             neg = True
         result = self._parse_bivariate_term()
         if neg:
-            result = {(ex, ey): -c for (ex, ey), c in result.items()}
+            result = {k: -c for k, c in result.items()}
         while self.peek() and self.peek().kind in (Tok.PLUS, Tok.MINUS):
             op = self.next()
             term = self._parse_bivariate_term()
@@ -486,15 +509,23 @@ class Parser:
         return {k: c for k, c in result.items() if c != 0}
 
     def _parse_bivariate_term(self):
-        """Parse a term: factor ('*' factor)*. Returns {(ex,ey): Fraction}."""
-        result = {(0, 0): Fraction(1)}
+        """Parse a term: factor ('*' factor)*.
+        Returns {(ex, ord): Fraction}. Rejects y*y (nonlinear).
+        """
+        result = {(0, -1): Fraction(1)}
         while True:
             f = self._parse_bivariate_factor()
             # Multiply result * f
             new = {}
-            for (ex1, ey1), c1 in result.items():
-                for (ex2, ey2), c2 in f.items():
-                    k = (ex1 + ex2, ey1 + ey2)
+            for (ex1, ord1), c1 in result.items():
+                for (ex2, ord2), c2 in f.items():
+                    # Nonlinear check: can't have two y factors
+                    if ord1 >= 0 and ord2 >= 0:
+                        raise ValueError(
+                            "only linear ODEs supported (y*y not allowed)")
+                    ex = ex1 + ex2
+                    ord_ = ord1 if ord1 >= 0 else ord2
+                    k = (ex, ord_)
                     new[k] = new.get(k, Fraction(0)) + c1 * c2
             result = new
             if self.peek() and self.peek().kind == Tok.STAR:
@@ -504,14 +535,14 @@ class Parser:
         return result
 
     def _parse_bivariate_factor(self):
-        """Parse a factor: number | x | y | x^N | '(' expr ')'.
-        Returns {(ex,ey): Fraction}.
+        """Parse a factor: number | x | x^N | y | y' | y'' | ... | '(' expr ')'.
+        Returns {(ex, ord): Fraction} with ord=-1 for no y.
         """
         t = self.next()
         if t.kind == Tok.INT:
-            return {(0, 0): Fraction(t.val)}
+            return {(0, -1): Fraction(t.val)}
         if t.kind == Tok.FLOAT:
-            return {(0, 0): t.val}
+            return {(0, -1): t.val}
         if t.kind == Tok.X:
             # Check for ^N
             if self.peek() and self.peek().kind == Tok.POW:
@@ -519,24 +550,25 @@ class Parser:
                 te = self.next()
                 if te.kind != Tok.INT or te.val < 0:
                     raise ValueError("exponent must be a non-negative integer")
-                return {(te.val, 0): Fraction(1)}
-            return {(1, 0): Fraction(1)}
+                return {(te.val, -1): Fraction(1)}
+            return {(1, -1): Fraction(1)}
         if t.kind == Tok.Y:
-            # y^N? (we'll reject ey>1 later, but parse it)
-            if self.peek() and self.peek().kind == Tok.POW:
+            # Count primes: y, y', y'', ...
+            ord_ = 0
+            while self.peek() and self.peek().kind == Tok.PRIME:
                 self.next()
-                te = self.next()
-                if te.kind != Tok.INT or te.val < 0:
-                    raise ValueError("exponent must be a non-negative integer")
-                return {(0, te.val): Fraction(1)}
-            return {(0, 1): Fraction(1)}
+                ord_ += 1
+            # y^N not allowed (nonlinear); primes already handled
+            if self.peek() and self.peek().kind == Tok.POW:
+                raise ValueError("y^N not allowed (only linear ODEs)")
+            return {(0, ord_): Fraction(1)}
         if t.kind == Tok.LP:
             # '(' bivariate ')'
             inner = self._parse_bivariate()
             if self.next().kind != Tok.RP:
                 raise ValueError("missing ')'")
             return inner
-        raise ValueError("unexpected token in ODE right-hand side")
+        raise ValueError("unexpected token in ODE")
 
     def parse_expr(self):
         node = self.parse_term()
@@ -1210,23 +1242,27 @@ class Circuit:
         self._densify(cons, n)
 
     def _build_ode(self, spec):
-        """ODE circuit for ode(y' = a(x)*y + b(x), y(0) = v, deg = d).
+        """ODE circuit for general linear ODEs.
 
-        Witness (private, in aL): c_0, c_1, ..., c_d (d+1 coefficients).
+        Spec: diffeq {(ex, ord): coeff} (ord=-1 for pure x, ord>=0 for
+        y^(ord)), order (max derivative), ics {ord: val}, deg d.
+
+        Witness (private, in aL): c_0, ..., c_d (d+1 coefficients).
         y(x) = Σ c_i x^i.
 
+        y^(ord) = Σ_{i=0}^{d-ord} [(i+ord)!/i! * c_{i+ord}] x^i.
+
         Constraints (all linear, zero multiplication gates):
-          For k = 0..d-1: (k+1)*c_{k+1} - Σ_{j=0}^{k} a_j*c_{k-j} - b_k = 0
-            (coefficient of x^k in y' - a(x)*y - b(x) vanishes;
-             i.e., residual is O(x^d))
-          c_0 = v  (initial condition y(0) = v)
+          For k = 0..d-order: coeff of x^k in residual = 0
+            (residual is O(x^{d-order+1}))
+          For j = 0..order-1: j! * c_j = ics[j]  (initial conditions)
 
         All arithmetic exact in the field (Fractions via modular inverse).
         The proof leaks nothing about the coefficients (Bulletproofs ZK).
         """
-        a_poly = spec['a_poly']  # {exp: Fraction}
-        b_poly = spec['b_poly']  # {exp: Fraction}
-        ic_val = spec['ic_val']  # Fraction
+        diffeq = spec['diffeq']  # {(ex, ord): Fraction}
+        order = spec['order']  # int
+        ics = spec['ics']  # {ord: Fraction}
         d = spec['deg']  # int
         # Witness count: d+1. n = next power of 2.
         n_wit = d + 1
@@ -1235,9 +1271,15 @@ class Circuit:
             n *= 2
         self.n = n
         self._ode_degree = d
-        self._ode_a = a_poly
-        self._ode_b = b_poly
-        self._ode_ic = ic_val
+        self._ode_diffeq = diffeq
+        self._ode_order = order
+        self._ode_ics = ics
+        self._ode_spec_for_proof = spec
+
+        # Precompute factorials up to d (for derivative coefficients).
+        fact = [1] * (d + 1)
+        for i in range(1, d + 1):
+            fact[i] = fact[i - 1] * i
 
         cons = []
 
@@ -1248,65 +1290,84 @@ class Circuit:
             """Fraction -> field element (exact via modular inverse)."""
             return (fr.numerator * pow(fr.denominator, N - 2, N)) % N
 
-        # Constraint set 1: for k=0..d-1,
-        #   (k+1)*c_{k+1} - Σ_{j=0}^{k} a_j*c_{k-j} - b_k = 0.
-        for k in range(d):
+        # Constraint set 1: for k=0..d-order, coeff of x^k in residual = 0.
+        # Residual = Σ_{(ex,ord),coeff} term.
+        # Term (coeff, ex, -1): coeff * x^ex → contributes coeff if ex==k.
+        # Term (coeff, ex, ord>=0): coeff * x^ex * y^(ord)
+        #   = coeff * Σ_i [(i+ord)!/i! * c_{i+ord}] x^{ex+i}
+        #   Coeff of x^k: coeff * (k-ex+ord)!/(k-ex)! * c_{k-ex+ord}
+        #   if 0 <= k-ex <= d-ord.
+        for k in range(d - order + 1):
             acc = {}
-            # (k+1)*c_{k+1}
-            gate("L", k + 1, k + 1, acc)
-            # - Σ_{j=0}^{k} a_j * c_{k-j}
-            for j in range(k + 1):
-                a_j = a_poly.get(j, Fraction(0))
-                if a_j != 0:
-                    # c_{k-j} is aL[k-j]
-                    coeff = (-_field(a_j)) % N
-                    gate("L", k - j, coeff, acc)
-            # - b_k (constant term)
-            b_k = b_poly.get(k, Fraction(0))
-            cons.append((acc, _field(b_k)))
+            const = Fraction(0)
+            for (ex, ord_), coeff in diffeq.items():
+                if ord_ == -1:
+                    if ex == k:
+                        const += coeff
+                else:
+                    i = k - ex  # index in y^(ord) expansion
+                    if 0 <= i <= d - ord_:
+                        # c_{i+ord} coefficient: coeff * (i+ord)!/i!
+                        c_idx = i + ord_
+                        mult = Fraction(fact[i + ord_], fact[i])
+                        gate("L", c_idx, (_field(coeff * mult)) % N, acc)
+            cons.append((acc, _field(-const) % N))
 
-        # Constraint set 2: c_0 = ic_val.
-        acc = {}
-        gate("L", 0, 1, acc)
-        cons.append((acc, _field(ic_val)))
+        # Constraint set 2: initial conditions j! * c_j = ics[j].
+        for j in range(order):
+            acc = {}
+            gate("L", j, fact[j] % N, acc)
+            cons.append((acc, _field(ics[j])))
 
         self._densify(cons, n)
-        # Symbolic canonical (red line: no numeric coefficients).
-        # Format: ode(y'=<a>y+<b>,y(0)=<v>,deg=<d>)
-        def _poly_str(p):
-            if not p:
-                return "0"
-            terms = []
-            for e in sorted(p.keys()):
-                c = p[e]
-                cs = (str(c.numerator) if c.denominator == 1
-                      else "%d/%d" % (c.numerator, c.denominator))
-                if e == 0:
-                    terms.append(cs)
-                elif e == 1:
-                    terms.append("%s*x" % cs if cs not in ("1", "-1") else
-                                 ("x" if cs == "1" else "-x"))
-                else:
-                    terms.append("%s*x^%d" % (cs, e) if cs not in ("1", "-1") else
-                                 ("x^%d" % e if cs == "1" else "-x^%d" % e))
-            s = "+".join(terms).replace("+-", "-")
+        # Symbolic canonical (red line: no numeric coefficients in the
+        # equation part; ics and deg are part of the statement).
+        # Format: ode(<diffeq_str>,<ics_str>,deg=<d>)
+        def _term_str(ex, ord_, coeff):
+            # coeff * x^ex * y^(ord)
+            cs = (str(coeff.numerator) if coeff.denominator == 1
+                  else "%d/%d" % (coeff.numerator, coeff.denominator))
+            parts = []
+            if cs not in ("1", "-1"):
+                parts.append(cs)
+            elif cs == "-1":
+                parts.append("-")
+            # x part
+            if ex == 0:
+                pass
+            elif ex == 1:
+                parts.append("x")
+            else:
+                parts.append("x^%d" % ex)
+            # y part
+            if ord_ == -1:
+                pass
+            elif ord_ == 0:
+                parts.append("y")
+            elif ord_ == 1:
+                parts.append("y'")
+            else:
+                parts.append("y" + "'" * ord_)
+            s = "*".join(parts)
+            if s == "" or s == "-":
+                s = cs  # just the coefficient
             return s
-        a_str = _poly_str(a_poly)
-        b_str = _poly_str(b_poly)
-        # RHS = a(x)*y + b(x)
-        if a_poly and b_poly:
-            rhs_str = "%s*y+%s" % (a_str, b_str)
-        elif a_poly:
-            # a(x)*y, handle coefficient 1
-            rhs_str = "%s*y" % ("" if a_str == "1" else a_str)
-            if rhs_str.startswith("*"):
-                rhs_str = rhs_str[1:]
-        else:
-            rhs_str = b_str
-        rhs_str = rhs_str.replace("+-", "-")
-        ic_str = (str(ic_val.numerator) if ic_val.denominator == 1
-                  else "%d/%d" % (ic_val.numerator, ic_val.denominator))
-        self._ode_canon = "ode(y'=%s,y(0)=%s,deg=%d)" % (rhs_str, ic_str, d)
+        terms = []
+        for (ex, ord_) in sorted(diffeq.keys()):
+            coeff = diffeq[(ex, ord_)]
+            terms.append(_term_str(ex, ord_, coeff))
+        diffeq_str = "+".join(terms).replace("+-", "-").replace("*-", "*-")
+        # Clean up: "-x" instead of "-1*x", etc. (simple)
+        diffeq_str = diffeq_str.replace("*-", "* -").replace("+ -", "- ")
+        ics_parts = []
+        for j in sorted(ics.keys()):
+            v = ics[j]
+            vs = (str(v.numerator) if v.denominator == 1
+                  else "%d/%d" % (v.numerator, v.denominator))
+            yname = "y" + "'" * j if j > 0 else "y"
+            ics_parts.append("%s(0)=%s" % (yname, vs))
+        ics_str = ",".join(ics_parts)
+        self._ode_canon = "ode(%s=0,%s,deg=%d)" % (diffeq_str, ics_str, d)
 
     def _process_integral(self, poly, spec):
         """Handle int(f,a,b): verify form, store spec for FTC.
@@ -1569,29 +1630,40 @@ class Circuit:
         """True iff X satisfies the equation (within precision)."""
         if self.mode == "ode":
             # ODE: X = [c_0..c_d] as field elements.
-            # Verify: (k+1)*c_{k+1} - Σ a_j*c_{k-j} - b_k = 0 for k<d,
-            # and c_0 = ic_val.
+            # Verify residual coefficients and ICs.
             d = self._ode_degree
-            a_poly = self._ode_a
-            b_poly = self._ode_b
-            ic_val = self._ode_ic
+            diffeq = self._ode_diffeq
+            order = self._ode_order
+            ics = self._ode_ics
             def _field(fr):
                 return (fr.numerator * pow(fr.denominator, N - 2, N)) % N
-            # Check ODE residual coefficients
-            for k in range(d):
-                # (k+1)*c_{k+1}
-                lhs = ((k + 1) * (X[k + 1] % N)) % N
-                # - Σ_{j=0}^{k} a_j * c_{k-j}
-                for j in range(k + 1):
-                    a_j = a_poly.get(j, Fraction(0))
-                    if a_j != 0:
-                        lhs = (lhs - _field(a_j) * (X[k - j] % N)) % N
-                # Should equal b_k
-                b_k = b_poly.get(k, Fraction(0))
-                if lhs != _field(b_k):
+            # Precompute factorials
+            fact = [1] * (d + 1)
+            for i in range(1, d + 1):
+                fact[i] = fact[i - 1] * i
+            # Check residual: for k=0..d-order, coeff of x^k = 0.
+            for k in range(d - order + 1):
+                lhs = 0
+                const = 0
+                for (ex, ord_), coeff in diffeq.items():
+                    if ord_ == -1:
+                        if ex == k:
+                            const = (const + _field(coeff)) % N
+                    else:
+                        i = k - ex
+                        if 0 <= i <= d - ord_:
+                            c_idx = i + ord_
+                            mult = (fact[i + ord_] * pow(fact[i], N - 2, N)) % N
+                            lhs = (lhs + _field(coeff) * mult % N
+                                   * (X[c_idx] % N)) % N
+                # lhs + const should be 0
+                if (lhs + const) % N != 0:
                     return False
-            # Check IC
-            return (X[0] % N) == _field(ic_val)
+            # Check ICs: j! * c_j = ics[j]
+            for j in range(order):
+                if (fact[j] % N) * (X[j] % N) % N != _field(ics[j]):
+                    return False
+            return True
         if self.mode == "ftc":
             # FTC: X = [F_0..F_{d+1}, v] as field elements.
             # Verify: (j+1)*F_{j+1} = c_j, and v = Σ F_j*(b^j - a^j).

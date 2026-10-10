@@ -225,6 +225,16 @@ def prove_equation(eq_str, witness, precision):
         proof = bulletproof.prove(circ, aL, aR, aO)
         proof["equation"] = circ.canonical
         proof["precision"] = k
+        # Store ODE spec for coarse verification (deg_prove, diffeq, ics).
+        # Fractions are stored as strings for JSON compatibility.
+        _spec = circ._ode_spec_for_proof
+        proof["ode_spec"] = {
+            'diffeq': [((ex, ord_), str(coeff))
+                       for (ex, ord_), coeff in _spec['diffeq'].items()],
+            'order': _spec['order'],
+            'ics': [(ord_, str(v)) for ord_, v in _spec['ics'].items()],
+            'deg': _spec['deg'],
+        }
         return proof
     # Strict pre-check (the definition) applies to every equation:
     # |witness - exact root| < 1/k (complex modulus if complex).
@@ -381,26 +391,73 @@ def ode_coefficients(eq_str):
     Returns a list of Fractions [c_0, c_1, ..., c_d].
     Raises ValueError if not an ODE equation.
     
-    Solves (k+1)*c_{k+1} - Σ a_j*c_{k-j} = b_k for k=0..d-1,
-    with c_0 = ic_val. Exact Fraction arithmetic.
+    Solves the linear system from residual coefficients (k=0..d-order)
+    and initial conditions. Exact Fraction arithmetic.
     """
     _, _, _, _, ode_spec = circuit_mod.parse_polynomial(eq_str)
     if ode_spec is None:
         raise ValueError("not an ODE equation")
-    a_poly = ode_spec['a_poly']
-    b_poly = ode_spec['b_poly']
-    ic_val = ode_spec['ic_val']
+    diffeq = ode_spec['diffeq']
+    order = ode_spec['order']
+    ics = ode_spec['ics']
     d = ode_spec['deg']
-    c = [Fraction(0)] * (d + 1)
-    c[0] = ic_val
-    for k in range(d):
-        # (k+1)*c_{k+1} = Σ_{j=0}^{k} a_j*c_{k-j} + b_k
-        s = b_poly.get(k, Fraction(0))
-        for j in range(k + 1):
-            a_j = a_poly.get(j, Fraction(0))
-            if a_j != 0 and c[k - j] != 0:
-                s += a_j * c[k - j]
-        c[k + 1] = s / (k + 1)
+    # Precompute factorials
+    fact = [1] * (d + 1)
+    for i in range(1, d + 1):
+        fact[i] = fact[i - 1] * i
+    # Build linear system: (d+1) equations, (d+1) unknowns.
+    # Rows 0..d-order: residual coeff of x^k = 0.
+    # Rows d-order+1 .. d: ICs (j! * c_j = ics[j]).
+    n = d + 1
+    # M[row][col], rhs[row]
+    M = [[Fraction(0)] * n for _ in range(n)]
+    rhs = [Fraction(0)] * n
+    # Residual rows
+    for k in range(d - order + 1):
+        for (ex, ord_), coeff in diffeq.items():
+            if ord_ == -1:
+                if ex == k:
+                    rhs[k] -= coeff
+            else:
+                i = k - ex
+                if 0 <= i <= d - ord_:
+                    c_idx = i + ord_
+                    M[k][c_idx] += coeff * Fraction(fact[i + ord_], fact[i])
+    # IC rows
+    for j in range(order):
+        row = d - order + 1 + j
+        M[row][j] = Fraction(fact[j])
+        rhs[row] = ics[j]
+    # Gaussian elimination (Fractions, exact).
+    # Forward elimination
+    for col in range(n):
+        # Find pivot
+        piv = None
+        for r in range(col, n):
+            if M[r][col] != 0:
+                piv = r
+                break
+        if piv is None:
+            raise ValueError("singular ODE system (cannot solve)")
+        if piv != col:
+            M[col], M[piv] = M[piv], M[col]
+            rhs[col], rhs[piv] = rhs[piv], rhs[col]
+        # Eliminate
+        for r in range(col + 1, n):
+            if M[r][col] != 0:
+                f = M[r][col] / M[col][col]
+                for c2 in range(col, n):
+                    M[r][c2] -= f * M[col][c2]
+                rhs[r] -= f * rhs[col]
+    # Back substitution
+    c = [Fraction(0)] * n
+    for r in range(n - 1, -1, -1):
+        s = rhs[r]
+        for c2 in range(r + 1, n):
+            s -= M[r][c2] * c[c2]
+        if M[r][r] == 0:
+            raise ValueError("singular ODE system (cannot solve)")
+        c[r] = s / M[r][r]
     return c
 
 
@@ -430,38 +487,47 @@ def verify_equation(eq_str, proof, precision):
         proof_eq = proof.get("equation", "")
         # ODE coarse verification: a deg_prove proof verifies against
         # deg_verify <= deg_prove (finer proof implies coarser statement).
-        if ode_spec is not None and proof_eq.startswith("ode("):
-            # Parse proof's canonical for deg_prove and ODE spec.
-            # Canonical format: ode(y'=<rhs>,y(0)=<v>,deg=<d>)
-            import re
-            m = re.match(r"ode\(y'=(.*),y\(0\)=(.*),deg=(\d+)\)$", proof_eq)
-            if not m:
-                return False
-            deg_prove = int(m.group(3))
+        if ode_spec is not None and "ode_spec" in proof:
+            from fractions import Fraction as _Fr
+            ps = proof["ode_spec"]
+            # Reconstruct proof's spec
+            proof_diffeq = {(ex, ord_): _Fr(coeff_str)
+                            for (ex, ord_), coeff_str in ps['diffeq']}
+            proof_ics = {ord_: _Fr(v_str) for ord_, v_str in ps['ics']}
+            deg_prove = ps['deg']
             deg_verify = ode_spec['deg']
-            # Check ODE matches (a_poly, b_poly, ic_val), ignoring deg.
-            # Re-parse proof_eq to get its spec.
-            _, _, _, _, proof_spec = circuit_mod.parse_polynomial(
-                "ode(y' = %s, y(0) = %s, deg = %d)" % (
-                    m.group(1), m.group(2), deg_prove))
-            if proof_spec is None:
-                return False
-            # Compare a_poly, b_poly, ic_val
-            if (proof_spec['a_poly'] != ode_spec['a_poly'] or
-                    proof_spec['b_poly'] != ode_spec['b_poly'] or
-                    proof_spec['ic_val'] != ode_spec['ic_val']):
+            # Check ODE matches (diffeq, order, ics), ignoring deg.
+            if (proof_diffeq != ode_spec['diffeq'] or
+                    ps['order'] != ode_spec['order'] or
+                    proof_ics != ode_spec['ics']):
                 return False
             # Coarse check: deg_verify <= deg_prove
             if deg_verify > deg_prove:
                 return False
-            # Verify against the deg_prove circuit (reconstruct from proof).
-            # The proof's coefficients satisfy deg_prove constraints,
-            # which implies deg_verify constraints.
-            circ = circuit_mod.compile(
-                "ode(y' = %s, y(0) = %s, deg = %d)" % (
-                    m.group(1), m.group(2), deg_prove),
-                "1")
-            # proof['equation'] should match the deg_prove canonical
+            # Verify against the deg_prove circuit.
+            # Reconstruct eq_str with deg_prove for circuit building.
+            # We use the proof's canonical directly via a dummy compile.
+            # Simpler: verify the proof's equation matches a circuit built
+            # with deg_prove. We'll reconstruct the input string.
+            # For now, use the stored spec to build a circuit directly.
+            # (We need an eq_str; reconstruct from spec.)
+            # Actually, easiest: the proof is valid if the Bulletproofs
+            # verifies against a circuit with the proof's spec.
+            # Build circuit manually:
+            _spec_prove = {
+                'diffeq': proof_diffeq,
+                'order': ps['order'],
+                'ics': proof_ics,
+                'deg': deg_prove,
+            }
+            # Create a circuit via compile with a reconstructed string.
+            # Reconstruct: ode(<diffeq_str>,<ics_str>,deg=<d>)
+            # For simplicity, we verify using the proof's own canonical
+            # by checking the proof dict directly with bulletproof.
+            # We need a Circuit object; build one via a helper.
+            circ = circuit_mod.Circuit(
+                "ode_dummy", {0: (0, 0)}, "1", False, False,
+                ode_spec=_spec_prove)
             if proof_eq != circ.canonical:
                 return False
             return bulletproof.verify(circ, proof)

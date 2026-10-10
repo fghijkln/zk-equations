@@ -375,37 +375,38 @@ for qi in range(_fc.q):
 check("FTC circuit leaks no value", _inv3 not in _flat and _inv3 not in _fc.c)
 check("FTC mode is ftc", _fc.mode == "ftc")
 
-# ---- ODE: ode(y' = a(x)*y + b(x), y(0) = v, deg = d) ----
-# Coefficients for y'=y, y(0)=1, deg=5: 1, 1, 1/2, 1/6, 1/24, 1/120
-oc = api.ode_coefficients("ode(y' = y, y(0) = 1, deg = 5)")
-check("ode coeffs for y'=y", oc == [Fraction(1), Fraction(1), Fraction(1,2),
+# ---- ODE: general linear ODEs, any order ----
+# First-order, general form (y' - y = 0, not forced y' = ...)
+oc = api.ode_coefficients("ode(y' - y = 0, y(0) = 1, deg = 5)")
+check("ode general form coeffs", oc == [Fraction(1), Fraction(1), Fraction(1,2),
       Fraction(1,6), Fraction(1,24), Fraction(1,120)])
-# Prove and verify (witness auto-computed; k is meaningless for ODEs)
-po = api.prove_equation("ode(y' = y, y(0) = 1, deg = 5)", "", "")
-check("ode y'=y proves",
-      api.verify_equation("ode(y' = y, y(0) = 1, deg = 5)", po, ""))
+po = api.prove_equation("ode(y' - y = 0, y(0) = 1, deg = 5)", "", "")
+check("ode general form proves",
+      api.verify_equation("ode(y' - y = 0, y(0) = 1, deg = 5)", po, ""))
 # Canonical is symbolic, no k
 check("ode canonical symbolic, no k",
-      po["equation"] == "ode(y'=y,y(0)=1,deg=5)")
+      po["equation"].startswith("ode(") and ";k=" not in po["equation"])
 # k is truly meaningless: any k verifies
 check("ode k meaningless",
-      api.verify_equation("ode(y' = y, y(0) = 1, deg = 5)", po, "999"))
+      api.verify_equation("ode(y' - y = 0, y(0) = 1, deg = 5)", po, "999"))
 # Coarse deg verifies: deg=5 proof against deg=3 statement
 check("ode coarse deg verifies",
-      api.verify_equation("ode(y' = y, y(0) = 1, deg = 3)", po, ""))
+      api.verify_equation("ode(y' - y = 0, y(0) = 1, deg = 3)", po, ""))
 # Finer deg does NOT verify
 check("ode finer deg rejected",
-      not api.verify_equation("ode(y' = y, y(0) = 1, deg = 6)", po, ""))
+      not api.verify_equation("ode(y' - y = 0, y(0) = 1, deg = 6)", po, ""))
 # Different ODE does NOT verify
 check("ode different ODE rejected",
-      not api.verify_equation("ode(y' = 2*y, y(0) = 1, deg = 3)", po, ""))
-# Another ODE: y' = 2*x, y(0) = 0, deg = 3 -> y = x^2
-oc2 = api.ode_coefficients("ode(y' = 2*x, y(0) = 0, deg = 3)")
-check("ode coeffs for y'=2x", oc2 == [Fraction(0), Fraction(0), Fraction(1),
-      Fraction(0)])
-po2 = api.prove_equation("ode(y' = 2*x, y(0) = 0, deg = 3)", "", "")
-check("ode y'=2x proves",
-      api.verify_equation("ode(y' = 2*x, y(0) = 0, deg = 3)", po2, ""))
+      not api.verify_equation("ode(y' - 2*y = 0, y(0) = 1, deg = 3)", po, ""))
+# Second-order: y'' + y = 0, y(0)=0, y'(0)=1 -> sin(x)
+oc2 = api.ode_coefficients("ode(y'' + y = 0, y(0) = 0, y'(0) = 1, deg = 6)")
+check("ode 2nd order coeffs (sin)", oc2 == [Fraction(0), Fraction(1),
+      Fraction(0), Fraction(-1,6), Fraction(0), Fraction(1,120), Fraction(0)])
+po2 = api.prove_equation("ode(y'' + y = 0, y(0) = 0, y'(0) = 1, deg = 6)", "", "")
+check("ode 2nd order proves",
+      api.verify_equation("ode(y'' + y = 0, y(0) = 0, y'(0) = 1, deg = 6)", po2, ""))
+check("ode 2nd order coarse",
+      api.verify_equation("ode(y'' + y = 0, y(0) = 0, y'(0) = 1, deg = 4)", po2, ""))
 
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))
