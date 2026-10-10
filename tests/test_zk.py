@@ -390,9 +390,15 @@ check("ode canonical symbolic, no k",
 # k is truly meaningless: any k verifies
 check("ode k meaningless",
       api.verify_equation("ode(y' = y, y(0) = 1, deg = 5)", po, "999"))
-# Different deg does NOT verify (different circuit)
-check("ode different deg rejected",
+# Coarse deg verifies: deg=5 proof against deg=3 statement
+check("ode coarse deg verifies",
+      api.verify_equation("ode(y' = y, y(0) = 1, deg = 3)", po, ""))
+# Finer deg does NOT verify
+check("ode finer deg rejected",
       not api.verify_equation("ode(y' = y, y(0) = 1, deg = 6)", po, ""))
+# Different ODE does NOT verify
+check("ode different ODE rejected",
+      not api.verify_equation("ode(y' = 2*y, y(0) = 1, deg = 3)", po, ""))
 # Another ODE: y' = 2*x, y(0) = 0, deg = 3 -> y = x^2
 oc2 = api.ode_coefficients("ode(y' = 2*x, y(0) = 0, deg = 3)")
 check("ode coeffs for y'=2x", oc2 == [Fraction(0), Fraction(0), Fraction(1),

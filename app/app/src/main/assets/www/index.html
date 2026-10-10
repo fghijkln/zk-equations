@@ -104,6 +104,37 @@
   <div id="verifyOut"></div>
 </div>
 
+<div class="card">
+  <h2 id="t_ode_h"></h2>
+  <p class="desc" id="t_ode_d"></p>
+  <label id="t_ode_eq_l"></label>
+  <input type="text" id="odeEq" value="y' = y, y(0) = 1" autocapitalize="off"
+         autocomplete="off" spellcheck="false">
+  <div class="hint" id="t_ode_eq_h"></div>
+  <label id="t_ode_deg_l"></label>
+  <input type="number" id="odeDeg" value="5" min="1" step="1" inputmode="numeric">
+  <div class="hint" id="t_ode_deg_h"></div>
+  <button id="btnOdeCoeffs" class="ghost"></button>
+  <div id="odeCoeffsOut"></div>
+  <button id="btnOdeProve"></button>
+  <div id="odeProveOut"></div>
+</div>
+
+<div class="card">
+  <h2 id="t_ode_verify_h"></h2>
+  <p class="desc" id="t_ode_verify_d"></p>
+  <label id="t_ode_eq2_l"></label>
+  <input type="text" id="odeEq2" value="y' = y, y(0) = 1" autocapitalize="off"
+         autocomplete="off" spellcheck="false">
+  <label id="t_ode_deg2_l"></label>
+  <input type="number" id="odeDeg2" value="3" min="1" step="1" inputmode="numeric">
+  <div class="hint" id="t_ode_deg2_h"></div>
+  <label id="t_ode_proof_l"></label>
+  <textarea id="odeProofIn" class="mono" spellcheck="false"></textarea>
+  <button id="btnOdeVerify"></button>
+  <div id="odeVerifyOut"></div>
+</div>
+
 <footer id="t_footer"></footer>
 
 <script>
@@ -124,7 +155,15 @@ const STR = {
     working: "计算中…", copy: "复制证明",
     pass: "✓ 验证通过", fail: "✗ 验证不通过",
     copied: "已复制", footer: "Bulletproofs 算术电路证明 · 纯 Python 实现，无需可信设置<br>学习级实现：数学真实，未经审计，请勿用于保护真实资产",
-    errApi: "桥接不可用"
+    errApi: "桥接不可用",
+    ode_h: "微分方程证明", ode_d: "证明你知道一个多项式函数，它在指定阶数下满足微分方程。系数保密，证明零知识。",
+    ode_eq_l: "方程与初值", ode_eq_h: "格式：y' = 右端, y(0) = 初值。右端是 x 和 y 的多项式（y 只能一次）。例：y' = y, y(0) = 1",
+    ode_deg_l: "阶数 deg", ode_deg_h: "渐近阶数：残差为 O(x^deg)。deg 越大逼近越好，证明也越大。这就是 ODE 的“精度”。",
+    btnOdeCoeffs: "查看系数", btnOdeProve: "生成 ODE 证明",
+    ode_verify_h: "验证 ODE 证明", ode_verify_d: "deg 可以比证明时的更粗（更小），粗精度验证会自动通过。",
+    ode_eq2_l: "方程与初值", ode_deg2_l: "阶数 deg（可更粗）",
+    ode_deg2_h: "验证时的 deg 可以小于证明时的 deg（粗精度自动通过），但不能更大。",
+    ode_proof_l: "证明（JSON）", btnOdeVerify: "验证 ODE 证明",
   },
   en: {
     tagline: "Zero-knowledge proofs for equations · prove you know x, without revealing it",
@@ -142,7 +181,15 @@ const STR = {
     working: "Computing…", copy: "Copy proof",
     pass: "✓ VALID", fail: "✗ INVALID",
     copied: "Copied", footer: "Bulletproofs arithmetic-circuit proofs · pure Python, no trusted setup<br>Learning-grade: real math, not audited — do not protect real assets with it",
-    errApi: "Bridge unavailable"
+    errApi: "Bridge unavailable",
+    ode_h: "ODE Proof", ode_d: "Prove you know a polynomial function satisfying the ODE to the given order. Coefficients stay secret.",
+    ode_eq_l: "Equation & initial value", ode_eq_h: "Format: y' = rhs, y(0) = value. RHS is a polynomial in x and y (y at most linear). E.g. y' = y, y(0) = 1",
+    ode_deg_l: "Degree", ode_deg_h: "Asymptotic order: residual is O(x^deg). Larger deg = better approximation = bigger proof. This is the ODE 'precision'.",
+    btnOdeCoeffs: "View coefficients", btnOdeProve: "Generate ODE proof",
+    ode_verify_h: "Verify ODE proof", ode_verify_d: "deg may be coarser (smaller) than at prove time; coarse verification passes automatically.",
+    ode_eq2_l: "Equation & initial value", ode_deg2_l: "Degree (may be coarser)",
+    ode_deg2_h: "Verification deg may be smaller than prove-time deg (coarse passes), but not larger.",
+    ode_proof_l: "Proof (JSON)", btnOdeVerify: "Verify ODE proof",
   }
 };
 let lang = "zh";
@@ -156,6 +203,9 @@ function applyLang() {
   document.getElementById("btnProve").textContent = t.btnProve;
   document.getElementById("btnVerify").textContent = t.btnVerify;
   document.getElementById("btnSolve").textContent = t.btnSolve;
+  document.getElementById("btnOdeCoeffs").textContent = t.btnOdeCoeffs;
+  document.getElementById("btnOdeProve").textContent = t.btnOdeProve;
+  document.getElementById("btnOdeVerify").textContent = t.btnOdeVerify;
   document.getElementById("lang").textContent = lang === "zh" ? "EN" : "中文";
 }
 document.getElementById("lang").onclick = () => {
@@ -267,6 +317,87 @@ document.getElementById("btnVerify").onclick = () => {
 function escapeHtml(s) {
   return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
+
+// ODE: two boxes (equation+BC, deg). No need to type ode(...).
+document.getElementById("btnOdeCoeffs").onclick = () => {
+  const out = document.getElementById("odeCoeffsOut");
+  const btn = document.getElementById("btnOdeCoeffs");
+  out.innerHTML = ""; btn.disabled = true;
+  btn.textContent = STR[lang].working;
+  setTimeout(() => {
+    try {
+      const r = JSON.parse(api().ode_coefficients(
+        document.getElementById("odeEq").value,
+        document.getElementById("odeDeg").value || "5"));
+      if (r.ok) {
+        out.innerHTML = '<div class="hint mono">' +
+          r.coeffs.map((c, i) => "c" + i + " = " + escapeHtml(c)).join("<br>") +
+          '</div>';
+      } else {
+        out.innerHTML = '<div class="err">' + escapeHtml(r.error) + '</div>';
+      }
+    } catch (e) {
+      out.innerHTML = '<div class="err">' + escapeHtml(String(e)) + '</div>';
+    }
+    btn.disabled = false; btn.textContent = STR[lang].btnOdeCoeffs;
+  }, 30);
+};
+
+document.getElementById("btnOdeProve").onclick = () => {
+  const out = document.getElementById("odeProveOut");
+  const btn = document.getElementById("btnOdeProve");
+  out.innerHTML = ""; btn.disabled = true;
+  btn.textContent = STR[lang].working;
+  setTimeout(() => {
+    try {
+      const r = JSON.parse(api().prove_ode(
+        document.getElementById("odeEq").value,
+        document.getElementById("odeDeg").value || "5"));
+      if (r.ok) {
+        const pj = JSON.stringify(r.proof);
+        out.innerHTML =
+          '<label>' + STR[lang].ode_proof_l + '</label>' +
+          '<textarea id="odeProofJson" class="mono" readonly></textarea>' +
+          '<button class="ghost" id="btnOdeCopy">' + STR[lang].copy + '</button>';
+        document.getElementById("odeProofJson").value = pj;
+        document.getElementById("btnOdeCopy").onclick = (e) => {
+          navigator.clipboard.writeText(pj).catch(() => {});
+          e.target.textContent = STR[lang].copied;
+        };
+      } else {
+        out.innerHTML = '<div class="err">' + escapeHtml(r.error) + '</div>';
+      }
+    } catch (e) {
+      out.innerHTML = '<div class="err">' + escapeHtml(String(e)) + '</div>';
+    }
+    btn.disabled = false; btn.textContent = STR[lang].btnOdeProve;
+  }, 30);
+};
+
+document.getElementById("btnOdeVerify").onclick = () => {
+  const out = document.getElementById("odeVerifyOut");
+  const btn = document.getElementById("btnOdeVerify");
+  out.innerHTML = ""; btn.disabled = true;
+  btn.textContent = STR[lang].working;
+  setTimeout(() => {
+    try {
+      const r = JSON.parse(api().verify_ode(
+        document.getElementById("odeEq2").value,
+        document.getElementById("odeDeg2").value || "3",
+        document.getElementById("odeProofIn").value));
+      if (r.ok) {
+        out.innerHTML = '<div class="verdict ' + (r.valid ? "ok" : "bad") + '">' +
+          (r.valid ? STR[lang].pass : STR[lang].fail) + '</div>';
+      } else {
+        out.innerHTML = '<div class="err">' + escapeHtml(r.error) + '</div>';
+      }
+    } catch (e) {
+      out.innerHTML = '<div class="err">' + escapeHtml(String(e)) + '</div>';
+    }
+    btn.disabled = false; btn.textContent = STR[lang].btnOdeVerify;
+  }, 30);
+};
+
 applyLang();
 </script>
 </body>

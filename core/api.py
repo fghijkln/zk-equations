@@ -427,12 +427,49 @@ def verify_equation(eq_str, proof, precision):
     try:
         if not isinstance(proof, dict):
             return False
+        proof_eq = proof.get("equation", "")
+        # ODE coarse verification: a deg_prove proof verifies against
+        # deg_verify <= deg_prove (finer proof implies coarser statement).
+        if ode_spec is not None and proof_eq.startswith("ode("):
+            # Parse proof's canonical for deg_prove and ODE spec.
+            # Canonical format: ode(y'=<rhs>,y(0)=<v>,deg=<d>)
+            import re
+            m = re.match(r"ode\(y'=(.*),y\(0\)=(.*),deg=(\d+)\)$", proof_eq)
+            if not m:
+                return False
+            deg_prove = int(m.group(3))
+            deg_verify = ode_spec['deg']
+            # Check ODE matches (a_poly, b_poly, ic_val), ignoring deg.
+            # Re-parse proof_eq to get its spec.
+            _, _, _, _, proof_spec = circuit_mod.parse_polynomial(
+                "ode(y' = %s, y(0) = %s, deg = %d)" % (
+                    m.group(1), m.group(2), deg_prove))
+            if proof_spec is None:
+                return False
+            # Compare a_poly, b_poly, ic_val
+            if (proof_spec['a_poly'] != ode_spec['a_poly'] or
+                    proof_spec['b_poly'] != ode_spec['b_poly'] or
+                    proof_spec['ic_val'] != ode_spec['ic_val']):
+                return False
+            # Coarse check: deg_verify <= deg_prove
+            if deg_verify > deg_prove:
+                return False
+            # Verify against the deg_prove circuit (reconstruct from proof).
+            # The proof's coefficients satisfy deg_prove constraints,
+            # which implies deg_verify constraints.
+            circ = circuit_mod.compile(
+                "ode(y' = %s, y(0) = %s, deg = %d)" % (
+                    m.group(1), m.group(2), deg_prove),
+                "1")
+            # proof['equation'] should match the deg_prove canonical
+            if proof_eq != circ.canonical:
+                return False
+            return bulletproof.verify(circ, proof)
         # NOTE: k comes ONLY from the caller's explicit input (the
         # definition), NEVER from proof.get("precision").
         # The complex marker (;cx=1) is part of the circuit identifier
         # (like the equation), not the precision -- it tells the verifier
         # which circuit to build.
-        proof_eq = proof.get("equation", "")
         is_complex = proof_eq.endswith(";cx=1")
         circ = circuit_mod.compile(eq_str, str(precision).strip(),
                                    force_complex=is_complex)
