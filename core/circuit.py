@@ -214,7 +214,48 @@ def tokenize(s):
     return toks
 
 
-# ---------------- parser: AST -> polynomial {exp: Fraction} ----------------
+# ---------------- complex numbers: (re, im) as Fraction pairs ----------------
+# A complex number is a pair (re, im) of Fractions. Real numbers are (x, 0).
+# The imaginary unit i is purely formal (i^2 = -1); it never needs to
+# exist in the field. All pair-arithmetic identities hold in the ring.
+
+def _c(re, im=0):
+    """Make a complex pair from re/im (int, Fraction, or str)."""
+    return (Fraction(re), Fraction(im))
+
+
+def _cadd(a, b):
+    return (a[0] + b[0], a[1] + b[1])
+
+
+def _cneg(a):
+    return (-a[0], -a[1])
+
+
+def _csub(a, b):
+    return (a[0] - b[0], a[1] - b[1])
+
+
+def _cmul(a, b):
+    """(a+bi)(c+di) = (ac-bd) + (ad+bc)i. Schoolbook 4-mult."""
+    return (a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0])
+
+
+def _csq(a):
+    """(a+bi)^2 = (a^2-b^2) + 2abi."""
+    return (a[0] * a[0] - a[1] * a[1], 2 * a[0] * a[1])
+
+
+def _ciszero(a):
+    return a[0] == 0 and a[1] == 0
+
+
+def _cisgaussian_int(a):
+    """True iff both parts are integers (Gaussian integer)."""
+    return a[0].denominator == 1 and a[1].denominator == 1
+
+
+# ---------------- parser: AST -> polynomial {exp: (re, im)} ----------------
 
 class Parser:
     def __init__(self, toks):
@@ -290,14 +331,17 @@ class Parser:
     def parse_primary(self):
         t = self.next()
         if t.kind == Tok.INT:
-            return {0: Fraction(t.val)}
+            return {0: _c(t.val)}
         if t.kind == Tok.FLOAT:
             self.float_seen = True
-            return {0: t.val}
+            return {0: _c(t.val)}
         if t.kind == Tok.X:
-            return {1: Fraction(1)}
+            return {1: _c(1)}
         if t.kind == Tok.IDENT:
             name = t.val
+            if name == "i":
+                # imaginary unit (formal; i^2 = -1)
+                return {0: _c(0, 1)}
             if name not in _APPROX:
                 raise ValueError("unknown function '%s' "
                                  "(supported: sin, cos, exp, ln)" % name)
@@ -317,18 +361,18 @@ class Parser:
 
 
 def _clean(p):
-    return {e: c for e, c in p.items() if c != 0}
+    return {e: c for e, c in p.items() if not _ciszero(c)}
 
 
 def _padd(a, b):
     r = dict(a)
     for e, c in b.items():
-        r[e] = r.get(e, Fraction(0)) + c
+        r[e] = _cadd(r.get(e, _c(0)), c)
     return _clean(r)
 
 
 def _pneg(a):
-    return {e: -c for e, c in a.items()}
+    return {e: _cneg(c) for e, c in a.items()}
 
 
 def _psub(a, b):
@@ -336,7 +380,10 @@ def _psub(a, b):
 
 
 def _pscale(a, s):
-    return _clean({e: c * s for e, c in a.items()})
+    # s may be Fraction (real) or complex pair
+    if isinstance(s, tuple):
+        return _clean({e: _cmul(c, s) for e, c in a.items()})
+    return _clean({e: (c[0] * s, c[1] * s) for e, c in a.items()})
 
 
 def _pmul(a, b):
@@ -344,12 +391,12 @@ def _pmul(a, b):
     for e1, c1 in a.items():
         for e2, c2 in b.items():
             e = e1 + e2
-            r[e] = r.get(e, Fraction(0)) + c1 * c2
+            r[e] = _cadd(r.get(e, _c(0)), _cmul(c1, c2))
     return _clean(r)
 
 
 def _ppow(a, e):
-    r = {0: Fraction(1)}
+    r = {0: _c(1)}
     base = a
     while e:
         if e & 1:
@@ -393,19 +440,39 @@ def _round_frac(fr):
 
 
 def _canon_poly_frac(poly):
-    """poly: {exp: Fraction} -> canonical string (deterministic, injective)."""
+    """poly: {exp: Fraction or (re,im)} -> canonical string (deterministic).
+
+    For complex pairs, uses the real part (tolerance mode is real-only)."""
 
     def fmt(c):
+        # c may be a Fraction or a (re, im) pair
+        if isinstance(c, tuple):
+            c = c[0]
         return (str(c.numerator) if c.denominator == 1
                 else "%d/%d" % (c.numerator, c.denominator))
+
+    def is_zero(c):
+        if isinstance(c, tuple):
+            return c[0] == 0 and c[1] == 0
+        return c == 0
+
+    def is_neg(c):
+        if isinstance(c, tuple):
+            return c[0] < 0
+        return c < 0
+
+    def abs_c(c):
+        if isinstance(c, tuple):
+            return abs(c[0])
+        return abs(c)
 
     terms = []
     for e in sorted(poly.keys(), reverse=True):
         c = poly[e]
-        if c == 0:
+        if is_zero(c):
             continue
-        sign = "-" if c < 0 else "+"
-        ac = abs(c)
+        sign = "-" if is_neg(c) else "+"
+        ac = abs_c(c)
         cs = fmt(ac)
         if e == 0:
             body = cs
@@ -450,6 +517,66 @@ def _canon_poly(poly):
     return s + "=0"
 
 
+def _fmt_complex(c):
+    """(re, im) signed ints -> string like "1+2i", "3", "-i"."""
+    re, im = c
+    if im == 0:
+        return str(re)
+    if re == 0:
+        if im == 1:
+            return "i"
+        if im == -1:
+            return "-i"
+        return "%di" % im
+    # both nonzero
+    if im == 1:
+        im_s = "+i"
+    elif im == -1:
+        im_s = "-i"
+    elif im > 0:
+        im_s = "+%di" % im
+    else:
+        im_s = "%di" % im
+    return "%s%s" % (re, im_s)
+
+
+def _canon_poly_complex(poly):
+    """poly: {exp: (re, im) signed ints} -> canonical like "(1+2i)*x^2+3*x-1+i=0"."""
+    terms = []
+    for e in sorted(poly.keys(), reverse=True):
+        c = poly[e]
+        if c == (0, 0):
+            continue
+        # Determine sign from the formatted complex (leading "-" if re<0 or re==0 and im<0)
+        cs = _fmt_complex(c)
+        if cs.startswith("-"):
+            sign = "-"
+            body_c = cs[1:]
+        else:
+            sign = "+"
+            body_c = cs
+        if e == 0:
+            body = body_c
+        elif e == 1:
+            # (a+bi)*x, but omit *1 for real 1
+            if c == (1, 0):
+                body = "x"
+            else:
+                body = "(%s)*x" % cs
+        else:
+            if c == (1, 0):
+                body = "x^%d" % e
+            else:
+                body = "(%s)*x^%d" % (cs, e)
+        terms.append((sign, body))
+    if not terms:
+        return "0=0"
+    s = ("" if terms[0][0] == "+" else "-") + terms[0][1]
+    for sign, body in terms[1:]:
+        s += sign + body
+    return s + "=0"
+
+
 def _to_signed(c):
     c %= N
     return c if c <= N // 2 else c - N
@@ -472,33 +599,54 @@ class Circuit:
                  (always includes ";k=<k>")
     """
 
-    def __init__(self, eq_str, poly, precision, trans_used, float_seen):
+    def __init__(self, eq_str, poly, precision, trans_used, float_seen,
+                 force_complex=False):
         self.eq_str = eq_str
         # Precision k is MANDATORY for every equation (parsed first).
         self.precision = _parse_precision(precision)
-        # Normalize overall sign (leading coefficient positive) so that
-        # "38 = x^3+2*x+5" and "x^3+2*x+5 = 38" compile to the identical
-        # circuit and canonical form.
+        # Normalize overall sign so that "38 = x^3+2*x+5" and
+        # "x^3+2*x+5 = 38" compile to the identical circuit and
+        # canonical form. For complex leading coefficient (a+bi):
+        # make a > 0, or if a == 0 then b > 0.
         if poly:
             lc = poly[max(poly.keys())]
-            if lc < 0:
-                poly = {e: -c for e, c in poly.items()}
+            if lc[0] < 0 or (lc[0] == 0 and lc[1] < 0):
+                poly = {e: _cneg(c) for e, c in poly.items()}
         # Circuit mode is a pure size optimization, chosen from the
         # equation alone (the verifier reproduces it without the witness).
         # Any decimal literal (even "1.0") or transcendental function
         # selects tolerance mode: what you write is what you get.
+        # For complex: tolerance if any re/im part is non-integer.
         needs_tol = (trans_used or float_seen
-                     or any(c.denominator != 1 for c in poly.values()))
+                     or any(not _cisgaussian_int(c) for c in poly.values()))
+        # Complex detection: any coefficient with nonzero imaginary part,
+        # or forced by the caller (complex witness for a real equation).
+        is_complex = (force_complex
+                      or any(c[1] != 0 for c in poly.values()))
+        self.is_complex = is_complex
         if not needs_tol:
             self.mode = "exact"
-            poly_int = {e: int(c) % N for e, c in poly.items() if c != 0}
-            self._build_exact(poly_int)
-            self.canonical = ("%s;k=%d" % (
-                _canon_poly({e: _to_signed(v)
-                             for e, v in poly_int.items()}),
-                self.precision))
+            if is_complex:
+                poly_cint = {e: (int(c[0]) % N, int(c[1]) % N)
+                             for e, c in poly.items() if not _ciszero(c)}
+                self._build_exact_complex(poly_cint)
+                self.canonical = ("%s;k=%d;cx=1" % (
+                    _canon_poly_complex({e: (_to_signed(v[0]), _to_signed(v[1]))
+                                         for e, v in poly_cint.items()}),
+                    self.precision))
+            else:
+                poly_int = {e: int(c[0]) % N for e, c in poly.items()
+                            if not _ciszero(c)}
+                self._build_exact(poly_int)
+                self.canonical = ("%s;k=%d" % (
+                    _canon_poly({e: _to_signed(v)
+                                 for e, v in poly_int.items()}),
+                    self.precision))
         else:
             self.mode = "tolerance"
+            if is_complex:
+                # TODO: complex tolerance circuit
+                raise ValueError("complex tolerance mode not yet implemented")
             self._build_tolerance(poly, self.precision)
             self.canonical = ("%s;k=%d"
                               % (_canon_poly_frac(poly), self.precision))
@@ -562,6 +710,95 @@ class Circuit:
 
         self._densify(cons, n)
 
+    def _build_exact_complex(self, poly):
+        """Exact circuit for Gaussian-integer polynomials.
+
+        poly: {exp: (re_int, im_int)} with ints mod N.
+        Witness is a pair (A, B) = (re(x), im(x)).
+        Uses Horner's method; each complex multiplication costs 4 gates.
+        Proves re(P(x)) = 0 AND im(P(x)) = 0.
+        """
+        self._exact_poly_c = poly
+        self.degree = max(poly.keys()) if poly else 0
+        d = self.degree
+
+        if d == 0:
+            c0 = poly.get(0, (0, 0))
+            if c0 != (0, 0):
+                raise ValueError("equation has no solution (constant false)")
+            n = 1
+            self.n = n
+            self._densify([], n)
+            return
+
+        # Gates: 2 witness (A in aL[0], B in aL[1]) + 4 per Horner step.
+        n_real = 2 + 4 * d
+        n = 1
+        while n < n_real:
+            n *= 2
+        self.n = n
+
+        cons = []
+
+        def gate(which, i, coeff, acc):
+            acc[which, i] = (acc.get((which, i), 0) + coeff) % N
+
+        # Linear combination representation: dict {(which, idx): coeff}
+        # plus a constant. which is "L" or "O" ("R" not needed for inputs).
+        # Witness: A = aL[0], B = aL[1].
+
+        # acc = c_d (constant complex)
+        c_d = poly[d]
+        R = {}  # linear combo for re(acc)
+        I = {}  # linear combo for im(acc)
+        R_const = c_d[0] % N
+        I_const = c_d[1] % N
+
+        g = 2  # next gate index (0, 1 reserved for witness)
+        for e in range(d - 1, -1, -1):
+            # acc = acc * x + c_e
+            # (R + iI)(A + iB) = (RA - IB) + i(RB + IA)
+            # Gates: g+0: R*A, g+1: I*B, g+2: R*B, g+3: I*A
+            c_e = poly.get(e, (0, 0))
+            # Gate inputs: aL = R or I (linear combos), aR = A or B (witness).
+            # Constrain aL[g+k] to equal the linear combo.
+            for k, (lin, lin_const, widx) in enumerate([
+                (R, R_const, 0),  # g+0: R * A
+                (I, I_const, 1),  # g+1: I * B
+                (R, R_const, 1),  # g+2: R * B
+                (I, I_const, 0),  # g+3: I * A
+            ]):
+                gi = g + k
+                # aR[gi] = witness (A if widx==0 else B)
+                acc = {}
+                gate("R", gi, 1, acc)
+                gate("L", widx, N - 1, acc)
+                cons.append((acc, 0))  # aR[gi] = aL[widx]
+                # aL[gi] = linear combo
+                acc = {}
+                gate("L", gi, 1, acc)
+                for (w, idx), coeff in lin.items():
+                    gate(w, idx, N - coeff, acc)
+                cons.append((acc, lin_const % N))
+            # New acc: R' = (g+0) - (g+1) + re(c_e), I' = (g+2) + (g+3) + im(c_e)
+            R = {("O", g): 1, ("O", g + 1): N - 1}
+            I = {("O", g + 2): 1, ("O", g + 3): 1}
+            R_const = c_e[0] % N
+            I_const = c_e[1] % N
+            g += 4
+
+        # Final constraints: R = 0 and I = 0.
+        acc = {}
+        for (w, idx), coeff in R.items():
+            gate(w, idx, coeff, acc)
+        cons.append((acc, (-R_const) % N))  # re(P) = 0
+        acc = {}
+        for (w, idx), coeff in I.items():
+            gate(w, idx, coeff, acc)
+        cons.append((acc, (-I_const) % N))  # im(P) = 0
+
+        self._densify(cons, n)
+
     # ---- tolerance mode ----
 
     def _build_tolerance(self, poly, k):
@@ -575,6 +812,14 @@ class Circuit:
         S = TOL_S
         a = {}
         for e, c in poly.items():
+            # c is a (re, im) pair; tolerance mode is real-only for now.
+            # (Complex tolerance with R^2+I^2<=B^2 is future work.)
+            if isinstance(c, tuple):
+                if c[1] != 0:
+                    raise ValueError(
+                        "complex tolerance mode not yet implemented; "
+                        "use Gaussian integer equations for complex")
+                c = c[0]
             a[e] = _round_frac(S * c / (M_DEC ** e))
         self._tol_a = a
         self._tol_d = d
@@ -684,7 +929,8 @@ class Circuit:
     def evaluate(self, X):
         """Wire values for witness X: returns (a_L, a_R, a_O).
 
-        Exact mode: X is the integer witness.
+        Exact mode (real): X is the integer witness.
+        Exact mode (complex): X is a pair (A, B) = (re, im).
         Tolerance mode: X is the scaled integer witness (x = X / M_DEC).
         """
         n = self.n
@@ -692,6 +938,31 @@ class Circuit:
         aR = [0] * n
         aO = [0] * n
         if self.mode == "exact":
+            if hasattr(self, '_exact_poly_c'):
+                # Complex exact: Horner evaluation with pairs.
+                A, B = X[0] % N, X[1] % N
+                aL[0] = A; aR[0] = 1; aO[0] = A  # witness re
+                aL[1] = B; aR[1] = 1; aO[1] = B  # witness im
+                d = self.degree
+                if d == 0:
+                    return aL, aR, aO
+                poly = self._exact_poly_c
+                R, I = poly[d][0] % N, poly[d][1] % N
+                g = 2
+                for e in range(d - 1, -1, -1):
+                    RA = (R * A) % N
+                    IB = (I * B) % N
+                    RB = (R * B) % N
+                    IA = (I * A) % N
+                    aL[g] = R; aR[g] = A; aO[g] = RA
+                    aL[g+1] = I; aR[g+1] = B; aO[g+1] = IB
+                    aL[g+2] = R; aR[g+2] = B; aO[g+2] = RB
+                    aL[g+3] = I; aR[g+3] = A; aO[g+3] = IA
+                    c_e = poly.get(e, (0, 0))
+                    R = (RA - IB + c_e[0]) % N
+                    I = (RB + IA + c_e[1]) % N
+                    g += 4
+                return aL, aR, aO
             X = X % N
             d = self.degree
             if d >= 2:
@@ -750,6 +1021,20 @@ class Circuit:
     def check_witness(self, X):
         """True iff X satisfies the equation (within precision)."""
         if self.mode == "exact":
+            if hasattr(self, '_exact_poly_c'):
+                # Complex exact: Horner, check re=0 and im=0.
+                A, B = X[0] % N, X[1] % N
+                poly = self._exact_poly_c
+                d = self.degree
+                if d == 0:
+                    return poly.get(0, (0, 0)) == (0, 0)
+                R, I = poly[d][0] % N, poly[d][1] % N
+                for e in range(d - 1, -1, -1):
+                    c_e = poly.get(e, (0, 0))
+                    R_new = (R * A - I * B + c_e[0]) % N
+                    I_new = (R * B + I * A + c_e[1]) % N
+                    R, I = R_new, I_new
+                return R == 0 and I == 0
             X = X % N
             v = 0
             for exp, coeff in self._exact_poly.items():
@@ -790,14 +1075,18 @@ def _parse_precision(precision):
     return k
 
 
-def compile(eq_str, precision):
+def compile(eq_str, precision, force_complex=False):
     """Compile an equation string into a Circuit.
 
     precision: k as int/str; MANDATORY for every equation (no default).
     Final precision is 1/k: the witness must be within 1/k of an exact
     root (enforced by the prover before proving).
+    force_complex: if True, build a complex circuit even if the
+        coefficients are real (needed when the witness is complex,
+        e.g. x^2+1=0 with witness i).
     Raises ValueError on syntax errors, unsatisfiable equations, or a
     missing/invalid precision.
     """
     poly, trans_used, float_seen = parse_polynomial(eq_str)
-    return Circuit(eq_str, poly, precision, trans_used, float_seen)
+    return Circuit(eq_str, poly, precision, trans_used, float_seen,
+                   force_complex=force_complex)

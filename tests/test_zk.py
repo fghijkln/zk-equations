@@ -256,13 +256,15 @@ check("solver x^2=2 -> +-1.41421356",
 sr5 = api.solve_equation("(x-1)*(x-2)*(x-3)*(x-4)*(x-5)*(x-6) = 0",
                          decimals=8)
 check("solver shows at most 5 roots", len(sr5) == 5 and sr5[0] == "1")
-check("solver no real roots -> []",
-      api.solve_equation("x^2 + 1 = 0", decimals=8) == [])
+check("solver no real roots -> complex roots",
+      api.solve_equation("x^2 + 1 = 0", decimals=8) == ["-i", "i"])
 check("solver double root -> single '0'",
       api.solve_equation("x^2 = 0", decimals=8) == ["0"])
-# exact equation: solver returns plain integer; tapping it proves fine
-check("solver exact eq returns '3'",
-      api.solve_equation("x^3 + 2*x + 5 = 38", decimals=10) == ["3"])
+# exact equation: solver returns plain integer for the real root;
+# complex roots are also shown (v0.4.3)
+sr_ex = api.solve_equation("x^3 + 2*x + 5 = 38", decimals=10)
+check("solver exact eq returns '3' for real root",
+      "3" in sr_ex)
 pex = api.prove_equation("x^3 + 2*x + 5 = 38", "3", K)
 check("tapped integer witness proves",
       api.verify_equation("x^3 + 2*x + 5 = 38", pex, K))
@@ -302,6 +304,34 @@ check("integer equation with precision verifies",
 # decimal witness for integer equation: helpful error, not a crash
 expect_raises("decimal witness for integer equation refused",
               lambda: api.prove_equation("x^2 = 2", "1.41421356", "1000"))
+
+# ---------------- 9. complex numbers (v0.4.3) ----------------
+# Gaussian integer equations with complex witnesses.
+pc1 = api.prove_equation("x^2 + 1 = 0", "i", "1000")
+check("x^2+1=0 witness i verifies",
+      api.verify_equation("x^2 + 1 = 0", pc1, "1000"))
+check("x^2+1=0 witness i wrong k fails",
+      api.verify_equation("x^2 + 1 = 0", pc1, "999") is False)
+pc2 = api.prove_equation("x^2 + 1 = 0", "-i", "1000")
+check("x^2+1=0 witness -i verifies",
+      api.verify_equation("x^2 + 1 = 0", pc2, "1000"))
+# Complex coefficients
+pc3 = api.prove_equation("x = 1+i", "1+i", "1000")
+check("x=1+i verifies",
+      api.verify_equation("x = 1+i", pc3, "1000"))
+pc4 = api.prove_equation("(1+2i)*x = 1+2i", "1", "1000")
+check("(1+2i)*x=1+2i witness 1 verifies",
+      api.verify_equation("(1+2i)*x = 1+2i", pc4, "1000"))
+# Complex solver
+cr = api.solve_equation("x^2 + 1 = 0")
+check("solver finds i and -i for x^2+1=0",
+      "i" in cr and "-i" in cr)
+# Wrong witness refused
+expect_raises("wrong complex witness refused",
+              lambda: api.prove_equation("x^2 + 1 = 0", "1+i", "1000"))
+# Non-Gaussian-integer complex witness for exact equation refused
+expect_raises("non-Gaussian witness refused",
+              lambda: api.prove_equation("x^2 + 1 = 0", "0.5i", "1000"))
 
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))

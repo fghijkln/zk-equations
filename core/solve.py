@@ -35,11 +35,50 @@ R_DOM = float(circuit_mod.R_DOM)
 # ---------------- polynomial utilities (float) ----------------
 
 def _to_float_coeffs(poly):
-    """{exp: Fraction} -> [c_n, ..., c_0] floats, highest degree first."""
+    """{exp: Fraction or (re,im)} -> [c_n, ..., c_0] floats, highest degree first.
+    For complex pairs, takes the real part (use _to_complex_coeffs for full)."""
     if not poly:
         return [0.0]
     n = max(poly.keys())
-    return [float(poly.get(e, Fraction(0))) for e in range(n, -1, -1)]
+    out = []
+    for e in range(n, -1, -1):
+        c = poly.get(e, Fraction(0))
+        if isinstance(c, tuple):
+            out.append(float(c[0]))
+        else:
+            out.append(float(c))
+    return out
+
+
+def _to_complex_coeffs(poly):
+    """{exp: (re, im)} -> [c_n, ..., c_0] complex, highest degree first."""
+    if not poly:
+        return [0j]
+    n = max(poly.keys())
+    out = []
+    for e in range(n, -1, -1):
+        c = poly.get(e, (Fraction(0), Fraction(0)))
+        # c may be a pair (re, im) or a plain Fraction (real)
+        if isinstance(c, tuple):
+            out.append(complex(float(c[0]), float(c[1])))
+        else:
+            out.append(complex(float(c), 0.0))
+    return out
+
+
+def find_complex_roots(poly):
+    """All complex roots of {exp: (re,im)} poly. List of complex."""
+    coeffs = _to_complex_coeffs(poly)
+    n = len(coeffs) - 1
+    if n <= 0:
+        return []
+    roots = _aberth_ehrlich(coeffs)
+    # Deduplicate (Aberth can return near-duplicates for multiple roots)
+    uniq = []
+    for z in roots:
+        if not any(abs(z - u) < 1e-6 for u in uniq):
+            uniq.append(z)
+    return uniq
 
 
 def _horner(coeffs, x):
@@ -252,9 +291,54 @@ def find_roots(poly, lo=-5.0, hi=5.0, grid_n=2000):
     return roots
 
 
+def _fmt_complex_root(z, decimals):
+    """Format a complex root as "a+bi" string with given decimals."""
+    q = 10.0 ** decimals
+    def rnd(x):
+        v = math.floor(x * q + 0.5) / q if x >= 0 else -math.floor(-x * q + 0.5) / q
+        return 0.0 if v == 0 else v
+    re = rnd(z.real)
+    im = rnd(z.imag)
+    # Format with decimals, strip trailing zeros
+    def fmt(x):
+        s = "%.*f" % (decimals, x)
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return s if s not in ("", "-0") else "0"
+    re_s, im_s = fmt(re), fmt(abs(im))
+    if im == 0:
+        return re_s
+    if re == 0:
+        if im == 1:
+            return "i"
+        if im == -1:
+            return "-i"
+        return ("%s%s" % ("-" if im < 0 else "", im_s + "i"))
+    # both nonzero
+    if im == 1:
+        return "%s+i" % re_s
+    if im == -1:
+        return "%s-i" % re_s
+    sign = "+" if im > 0 else "-"
+    return "%s%s%si" % (re_s, sign, im_s)
+
+
+def _solve_complex(eq_str, poly, decimals, max_roots):
+    """Solve a complex polynomial; return up to max_roots "a+bi" strings."""
+    roots = find_complex_roots(poly)
+    out, seen = [], set()
+    for z in roots[:max_roots]:
+        s = _fmt_complex_root(z, decimals)
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
 def solve_equation(eq_str, decimals=8, max_roots=5):
-    """Solve eq_str; return up to max_roots real roots, rounded to
-    `decimals` places (for display). Raises ValueError on bad input.
+    """Solve eq_str; return up to max_roots roots as strings, rounded to
+    `decimals` places (for display). Real roots as "3" or "3.14";
+    complex roots as "a+bi" (e.g. "i", "1+2i"). Raises ValueError on bad input.
 
     Note: transcendental functions are solved as their fixed Chebyshev
     polynomials (the same polynomials the proof is about); the roots
@@ -265,24 +349,52 @@ def solve_equation(eq_str, decimals=8, max_roots=5):
     poly, trans_used, _ = circuit_mod.parse_polynomial(eq_str)
     if not poly:
         raise ValueError("empty equation")
-    lo, hi = _meaningful_domain(eq_str, trans_used)
-    roots = find_roots(poly, lo, hi)
-    q = 10.0 ** decimals
-
-    def rnd(r):
-        # round half away from zero, then format
-        v = math.floor(r * q + 0.5) / q if r >= 0 else -math.floor(-r * q + 0.5) / q
-        return v
-
+    # Use complex root finder for all; real roots have im≈0.
+    # For transcendental, restrict to the meaningful domain.
+    if trans_used:
+        lo, hi = _meaningful_domain(eq_str, trans_used)
+        # For transcendental, use the real finder (complex not meaningful)
+        roots = find_roots(poly, lo, hi)
+        # Convert to complex for uniform formatting
+        roots = [complex(r, 0) for r in roots]
+    else:
+        roots = find_complex_roots(poly)
+        # Sort by real then imaginary for deterministic order
+        roots.sort(key=lambda z: (z.real, z.imag))
+    # Check if exact (integer/Gaussian integer) for integer display
+    def _is_int_coeff(c):
+        if isinstance(c, tuple):
+            return c[0].denominator == 1 and c[1].denominator == 1
+        return c.denominator == 1
+    is_exact = (not trans_used
+                and all(_is_int_coeff(c) for c in poly.values()))
     out, seen = [], set()
-    for r in roots[:max_roots]:
-        v = rnd(r)
-        if v == 0:
-            v = 0.0  # avoid "-0.00000000"
-        key = "%.12f" % v
-        if key not in seen:
-            seen.add(key)
-            out.append(v)
+    eps_zero = 0.5 * 10**(-decimals)
+    for z in roots[:max_roots]:
+        # Snap tiny values to zero (numerical noise, esp. multiple roots)
+        # Use 1e-6 threshold for the snap, then format to decimals.
+        re = 0.0 if abs(z.real) < 1e-6 else z.real
+        im = 0.0 if abs(z.imag) < 1e-6 else z.imag
+        # Format: if imaginary part is negligible, show as real.
+        if im == 0.0:
+            # Real root
+            v = re
+            q = 10.0 ** decimals
+            rv = math.floor(v * q + 0.5) / q if v >= 0 else -math.floor(-v * q + 0.5) / q
+            if rv == 0:
+                rv = 0.0
+            if is_exact and abs(rv - round(rv)) < 1e-9:
+                s = str(int(round(rv)))
+            else:
+                # Keep trailing zeros to match expected format (e.g. "1.41421356")
+                s = "%.*f" % (decimals, rv)
+        else:
+            s = _fmt_complex_root(complex(re, im), decimals)
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+            if len(out) >= max_roots:
+                break
     return out
 
 
