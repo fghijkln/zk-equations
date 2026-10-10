@@ -715,8 +715,16 @@ class Circuit:
 
         poly: {exp: (re_int, im_int)} with ints mod N.
         Witness is a pair (A, B) = (re(x), im(x)).
-        Uses Horner's method; each complex multiplication costs 4 gates.
+        Uses Horner's method with Karatsuba 3-mult complex multiplication.
         Proves re(P(x)) = 0 AND im(P(x)) = 0.
+
+        Karatsuba 3-mult identity (exact in field arithmetic):
+          (R+iI)(A+iB): k1=A(R+I), k2=R(B-A), k3=I(A+B);
+          Re = k1-k3, Im = k1+k2.
+        Proof: k1-k3 = A(R+I)-I(A+B) = AR+AI-IA-IB = AR-IB;
+               k1+k2 = A(R+I)+R(B-A) = AR+AI+RB-RA = AI+RB. ∎
+        (Gauss; see docs/complex-division.md and research notes.)
+        Each complex multiplication costs 3 gates (vs 4 schoolbook).
         """
         self._exact_poly_c = poly
         self.degree = max(poly.keys()) if poly else 0
@@ -731,8 +739,8 @@ class Circuit:
             self._densify([], n)
             return
 
-        # Gates: 2 witness (A in aL[0], B in aL[1]) + 4 per Horner step.
-        n_real = 2 + 4 * d
+        # Gates: 2 witness (A in aL[0], B in aL[1]) + 3 per Horner step.
+        n_real = 2 + 3 * d
         n = 1
         while n < n_real:
             n *= 2
@@ -743,9 +751,13 @@ class Circuit:
         def gate(which, i, coeff, acc):
             acc[which, i] = (acc.get((which, i), 0) + coeff) % N
 
+        def _add_lin(dst, src, sign=1):
+            """Add linear combo src (dict) into dst (dict), with sign."""
+            for k, v in src.items():
+                dst[k] = (dst.get(k, 0) + sign * v) % N
+
         # Linear combination representation: dict {(which, idx): coeff}
-        # plus a constant. which is "L" or "O" ("R" not needed for inputs).
-        # Witness: A = aL[0], B = aL[1].
+        # plus a constant. Witness: A = aL[0], B = aL[1].
 
         # acc = c_d (constant complex)
         c_d = poly[d]
@@ -756,36 +768,53 @@ class Circuit:
 
         g = 2  # next gate index (0, 1 reserved for witness)
         for e in range(d - 1, -1, -1):
-            # acc = acc * x + c_e
-            # (R + iI)(A + iB) = (RA - IB) + i(RB + IA)
-            # Gates: g+0: R*A, g+1: I*B, g+2: R*B, g+3: I*A
+            # acc = acc * x + c_e, via Karatsuba 3-mult.
+            # k1 = A*(R+I), k2 = R*(B-A), k3 = I*(A+B).
             c_e = poly.get(e, (0, 0))
-            # Gate inputs: aL = R or I (linear combos), aR = A or B (witness).
-            # Constrain aL[g+k] to equal the linear combo.
-            for k, (lin, lin_const, widx) in enumerate([
-                (R, R_const, 0),  # g+0: R * A
-                (I, I_const, 1),  # g+1: I * B
-                (R, R_const, 1),  # g+2: R * B
-                (I, I_const, 0),  # g+3: I * A
+            # Linear combos for the three products:
+            #   S1 = R+I, S2 = B-A (witness), S3 = A+B (witness).
+            S1 = {}
+            _add_lin(S1, R, 1)
+            _add_lin(S1, I, 1)
+            S1_const = (R_const + I_const) % N
+            # S2 = B - A = aL[1] - aL[0]
+            S2 = {("L", 1): 1, ("L", 0): N - 1}
+            S2_const = 0
+            # S3 = A + B = aL[0] + aL[1]
+            S3 = {("L", 0): 1, ("L", 1): 1}
+            S3_const = 0
+            # Gate g+0: k1 = A * S1. aL = A (witness), aR = S1.
+            # Gate g+1: k2 = R * S2. aL = R, aR = S2.
+            # Gate g+2: k3 = I * S3. aL = I, aR = S3.
+            for k, (linL, constL, linR, constR) in enumerate([
+                (None, 0, S1, S1_const),      # g+0: aL=A, aR=S1
+                (R, R_const, S2, S2_const),   # g+1: aL=R, aR=S2
+                (I, I_const, S3, S3_const),   # g+2: aL=I, aR=S3
             ]):
                 gi = g + k
-                # aR[gi] = witness (A if widx==0 else B)
-                acc = {}
-                gate("R", gi, 1, acc)
-                gate("L", widx, N - 1, acc)
-                cons.append((acc, 0))  # aR[gi] = aL[widx]
-                # aL[gi] = linear combo
+                # aL[gi]: witness A if linL is None, else linear combo.
                 acc = {}
                 gate("L", gi, 1, acc)
-                for (w, idx), coeff in lin.items():
+                if linL is None:
+                    gate("L", 0, N - 1, acc)  # aL[gi] = aL[0] = A
+                    cons.append((acc, 0))
+                else:
+                    for (w, idx), coeff in linL.items():
+                        gate(w, idx, N - coeff, acc)
+                    cons.append((acc, constL % N))
+                # aR[gi] = linear combo.
+                acc = {}
+                gate("R", gi, 1, acc)
+                for (w, idx), coeff in linR.items():
                     gate(w, idx, N - coeff, acc)
-                cons.append((acc, lin_const % N))
-            # New acc: R' = (g+0) - (g+1) + re(c_e), I' = (g+2) + (g+3) + im(c_e)
-            R = {("O", g): 1, ("O", g + 1): N - 1}
-            I = {("O", g + 2): 1, ("O", g + 3): 1}
+                cons.append((acc, constR % N))
+            # New acc: R' = k1 - k3 + re(c_e), I' = k1 + k2 + im(c_e).
+            # k1 = aO[g], k2 = aO[g+1], k3 = aO[g+2].
+            R = {("O", g): 1, ("O", g + 2): N - 1}
+            I = {("O", g): 1, ("O", g + 1): 1}
             R_const = c_e[0] % N
             I_const = c_e[1] % N
-            g += 4
+            g += 3
 
         # Final constraints: R = 0 and I = 0.
         acc = {}
@@ -939,7 +968,7 @@ class Circuit:
         aO = [0] * n
         if self.mode == "exact":
             if hasattr(self, '_exact_poly_c'):
-                # Complex exact: Horner evaluation with pairs.
+                # Complex exact: Horner with Karatsuba 3-mult.
                 A, B = X[0] % N, X[1] % N
                 aL[0] = A; aR[0] = 1; aO[0] = A  # witness re
                 aL[1] = B; aR[1] = 1; aO[1] = B  # witness im
@@ -950,18 +979,20 @@ class Circuit:
                 R, I = poly[d][0] % N, poly[d][1] % N
                 g = 2
                 for e in range(d - 1, -1, -1):
-                    RA = (R * A) % N
-                    IB = (I * B) % N
-                    RB = (R * B) % N
-                    IA = (I * A) % N
-                    aL[g] = R; aR[g] = A; aO[g] = RA
-                    aL[g+1] = I; aR[g+1] = B; aO[g+1] = IB
-                    aL[g+2] = R; aR[g+2] = B; aO[g+2] = RB
-                    aL[g+3] = I; aR[g+3] = A; aO[g+3] = IA
+                    # k1 = A*(R+I), k2 = R*(B-A), k3 = I*(A+B)
+                    S1 = (R + I) % N
+                    S2 = (B - A) % N
+                    S3 = (A + B) % N
+                    k1 = (A * S1) % N
+                    k2 = (R * S2) % N
+                    k3 = (I * S3) % N
+                    aL[g] = A; aR[g] = S1; aO[g] = k1
+                    aL[g+1] = R; aR[g+1] = S2; aO[g+1] = k2
+                    aL[g+2] = I; aR[g+2] = S3; aO[g+2] = k3
                     c_e = poly.get(e, (0, 0))
-                    R = (RA - IB + c_e[0]) % N
-                    I = (RB + IA + c_e[1]) % N
-                    g += 4
+                    R = (k1 - k3 + c_e[0]) % N
+                    I = (k1 + k2 + c_e[1]) % N
+                    g += 3
                 return aL, aR, aO
             X = X % N
             d = self.degree
@@ -1022,7 +1053,7 @@ class Circuit:
         """True iff X satisfies the equation (within precision)."""
         if self.mode == "exact":
             if hasattr(self, '_exact_poly_c'):
-                # Complex exact: Horner, check re=0 and im=0.
+                # Complex exact: Horner with Karatsuba 3-mult.
                 A, B = X[0] % N, X[1] % N
                 poly = self._exact_poly_c
                 d = self.degree
@@ -1031,9 +1062,12 @@ class Circuit:
                 R, I = poly[d][0] % N, poly[d][1] % N
                 for e in range(d - 1, -1, -1):
                     c_e = poly.get(e, (0, 0))
-                    R_new = (R * A - I * B + c_e[0]) % N
-                    I_new = (R * B + I * A + c_e[1]) % N
-                    R, I = R_new, I_new
+                    # k1=A(R+I), k2=R(B-A), k3=I(A+B)
+                    k1 = (A * (R + I)) % N
+                    k2 = (R * (B - A)) % N
+                    k3 = (I * (A + B)) % N
+                    R = (k1 - k3 + c_e[0]) % N
+                    I = (k1 + k2 + c_e[1]) % N
                 return R == 0 and I == 0
             X = X % N
             v = 0
