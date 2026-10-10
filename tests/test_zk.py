@@ -7,6 +7,7 @@ Run:  python3 -m tests.test_zk
 import copy
 import json
 import time
+from fractions import Fraction
 
 from core import api, bulletproof
 from core import circuit as circuit_mod
@@ -373,6 +374,29 @@ for qi in range(_fc.q):
     _flat.append(_fc.c[qi])
 check("FTC circuit leaks no value", _inv3 not in _flat and _inv3 not in _fc.c)
 check("FTC mode is ftc", _fc.mode == "ftc")
+
+# ---- ODE: ode(y' = a(x)*y + b(x), y(0) = v, deg = d) ----
+# Coefficients for y'=y, y(0)=1, deg=5: 1, 1, 1/2, 1/6, 1/24, 1/120
+oc = api.ode_coefficients("ode(y' = y, y(0) = 1, deg = 5)")
+check("ode coeffs for y'=y", oc == [Fraction(1), Fraction(1), Fraction(1,2),
+      Fraction(1,6), Fraction(1,24), Fraction(1,120)])
+# Prove and verify (witness auto-computed)
+po = api.prove_equation("ode(y' = y, y(0) = 1, deg = 5)", "0", "1000")
+check("ode y'=y proves",
+      api.verify_equation("ode(y' = y, y(0) = 1, deg = 5)", po, "1000"))
+# Canonical is symbolic
+check("ode canonical symbolic",
+      po["equation"] == "ode(y'=y,y(0)=1,deg=5);k=1000")
+# Wrong k rejected
+check("ode wrong k rejected",
+      not api.verify_equation("ode(y' = y, y(0) = 1, deg = 5)", po, "999"))
+# Another ODE: y' = 2*x, y(0) = 0, deg = 3 -> y = x^2
+oc2 = api.ode_coefficients("ode(y' = 2*x, y(0) = 0, deg = 3)")
+check("ode coeffs for y'=2x", oc2 == [Fraction(0), Fraction(0), Fraction(1),
+      Fraction(0)])
+po2 = api.prove_equation("ode(y' = 2*x, y(0) = 0, deg = 3)", "0", "100")
+check("ode y'=2x proves",
+      api.verify_equation("ode(y' = 2*x, y(0) = 0, deg = 3)", po2, "100"))
 
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))

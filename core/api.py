@@ -119,7 +119,11 @@ def _check_precision(eq_str, w_frac, k):
     """
     # Vacuously true equation (zero polynomial): every x is a root,
     # so any witness is within precision.
-    poly, _, _, integral_spec = circuit_mod.parse_polynomial(eq_str)
+    poly, _, _, integral_spec, ode_spec = circuit_mod.parse_polynomial(eq_str)
+    # ODE equations: coefficients are exact (computed, not provided).
+    # No precision check needed.
+    if ode_spec is not None:
+        return 0.0
     if not poly or all(circuit_mod._ciszero(c) for c in poly.values()):
         return 0.0
     eps = 1.0 / k
@@ -194,6 +198,23 @@ def prove_equation(eq_str, witness, precision):
     w_pair, w_is_complex = _parse_witness_complex(witness)
     circ = circuit_mod.compile(eq_str, precision, force_complex=w_is_complex)
     k = circ.precision  # int, from the user-supplied definition (1/k)
+    # ODE mode: witness is computed automatically (coefficients are exact).
+    # Skip the precision pre-check (no user witness to check).
+    if circ.mode == "ode":
+        coeffs = ode_coefficients(eq_str)
+        def _field(fr):
+            return (fr.numerator * pow(fr.denominator,
+                                       circuit_mod.N - 2,
+                                       circuit_mod.N)) % circuit_mod.N
+        X = [_field(c) for c in coeffs]
+        if not circ.check_witness(X):
+            raise ValueError("ODE coefficients do not satisfy constraints")
+        aL, aR, aO = circ.evaluate(X)
+        assert circ.check_constraints(aL, aR, aO), "compiler bug: bad ODE wires"
+        proof = bulletproof.prove(circ, aL, aR, aO)
+        proof["equation"] = circ.canonical
+        proof["precision"] = k
+        return proof
     # Strict pre-check (the definition) applies to every equation:
     # |witness - exact root| < 1/k (complex modulus if complex).
     _check_precision(eq_str, w_pair if w_is_complex else w_pair[0], k)
@@ -294,7 +315,7 @@ def solve_equation(eq_str, decimals=8):
         return roots
     # exact (integer) equations: show integral roots as plain integers
     # ("3", not "3.00000000") so they can be tapped straight into prove
-    poly, trans_used, float_seen, _ = circuit_mod.parse_polynomial(eq)
+    poly, trans_used, float_seen, _, _ = circuit_mod.parse_polynomial(eq)
     def _is_int_coeff(c):
         if isinstance(c, tuple):
             return c[0].denominator == 1 and c[1].denominator == 1
@@ -317,7 +338,7 @@ def integral_value(eq_str, decimals=12):
     
     Uses the analytical antiderivative (exact Fraction), not Simpson.
     """
-    poly, _, _, integral_spec = circuit_mod.parse_polynomial(eq_str)
+    poly, _, _, integral_spec, _ = circuit_mod.parse_polynomial(eq_str)
     if integral_spec is None:
         raise ValueError("not an integral equation")
     f_poly = integral_spec['integrand']
@@ -342,6 +363,34 @@ def integral_value(eq_str, decimals=12):
     if "." in s:
         s = s.rstrip("0").rstrip(".")
     return s if s not in ("", "-0") else "0"
+
+
+def ode_coefficients(eq_str):
+    """Solve a linear ODE for its power series coefficients.
+    Returns a list of Fractions [c_0, c_1, ..., c_d].
+    Raises ValueError if not an ODE equation.
+    
+    Solves (k+1)*c_{k+1} - Σ a_j*c_{k-j} = b_k for k=0..d-1,
+    with c_0 = ic_val. Exact Fraction arithmetic.
+    """
+    _, _, _, _, ode_spec = circuit_mod.parse_polynomial(eq_str)
+    if ode_spec is None:
+        raise ValueError("not an ODE equation")
+    a_poly = ode_spec['a_poly']
+    b_poly = ode_spec['b_poly']
+    ic_val = ode_spec['ic_val']
+    d = ode_spec['deg']
+    c = [Fraction(0)] * (d + 1)
+    c[0] = ic_val
+    for k in range(d):
+        # (k+1)*c_{k+1} = Σ_{j=0}^{k} a_j*c_{k-j} + b_k
+        s = b_poly.get(k, Fraction(0))
+        for j in range(k + 1):
+            a_j = a_poly.get(j, Fraction(0))
+            if a_j != 0 and c[k - j] != 0:
+                s += a_j * c[k - j]
+        c[k + 1] = s / (k + 1)
+    return c
 
 
 def verify_equation(eq_str, proof, precision):

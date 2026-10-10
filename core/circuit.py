@@ -152,7 +152,7 @@ _CHEBYSHEV = {
 # ---------------- tokenizer ----------------
 
 class Tok:
-    INT, FLOAT, IDENT, X, PLUS, MINUS, STAR, POW, LP, RP, EQ, COMMA = range(12)
+    INT, FLOAT, IDENT, X, Y, PLUS, MINUS, STAR, POW, LP, RP, EQ, COMMA, PRIME = range(14)
 
     def __init__(self, kind, val=None):
         self.kind = kind
@@ -189,6 +189,8 @@ def tokenize(s):
             word = s[i:j]
             if len(word) == 1 and word in "xX":
                 toks.append(Tok(Tok.X))
+            elif len(word) == 1 and word in "yY":
+                toks.append(Tok(Tok.Y))
             else:
                 toks.append(Tok(Tok.IDENT, word.lower()))
             i = j
@@ -211,6 +213,8 @@ def tokenize(s):
             toks.append(Tok(Tok.EQ)); i += 1
         elif ch == ",":
             toks.append(Tok(Tok.COMMA)); i += 1
+        elif ch == "'":
+            toks.append(Tok(Tok.PRIME)); i += 1
         else:
             raise ValueError("unexpected character %r in equation" % ch)
     return toks
@@ -332,6 +336,7 @@ class Parser:
         self.trans_used = False
         self.float_seen = False
         self.integral_spec = None  # set if int(f,a,b) is used
+        self.ode_spec = None  # set if ode(...) is used
 
     def peek(self):
         return self.toks[self.pos] if self.pos < len(self.toks) else None
@@ -344,6 +349,11 @@ class Parser:
         return t
 
     def parse_equation(self):
+        # ODE top-level form: ode(y' = <rhs>, y(0) = <val>, deg = <d>)
+        # Check for 'ode' first (before regular equation parsing).
+        if (self.peek() is not None and self.peek().kind == Tok.IDENT
+                and self.peek().val == "ode"):
+            return self.parse_ode()
         lhs = self.parse_expr()
         t = self.next()
         if t.kind != Tok.EQ:
@@ -371,6 +381,162 @@ class Parser:
             if _is_int_side(rhs):
                 rhs = {0: _c(0)}
         return _psub(lhs, rhs)  # normalize: LHS - RHS = 0
+
+    def parse_ode(self):
+        """Parse ode(y' = <rhs>, y(0) = <val>, deg = <d>).
+        Returns a placeholder poly; stores spec in self.ode_spec.
+        RHS is a bivariate polynomial in (x, y), linear in y.
+        """
+        if self.ode_spec is not None:
+            raise ValueError("only one ode(...) per equation")
+        self.next()  # consume 'ode'
+        if self.next().kind != Tok.LP:
+            raise ValueError("expected '(' after 'ode'")
+        # y' =
+        if self.next().kind != Tok.Y:
+            raise ValueError("ode must start with y' = ...")
+        if self.next().kind != Tok.PRIME:
+            raise ValueError("ode must start with y' = ... (missing ')")
+        if self.next().kind != Tok.EQ:
+            raise ValueError("expected '=' after y'")
+        # RHS: bivariate polynomial in x and y, linear in y.
+        # Parse using a simple recursive descent for bivariate.
+        rhs = self._parse_bivariate()
+        if self.next().kind != Tok.COMMA:
+            raise ValueError("expected ',' after ODE right-hand side")
+        # y(0) = <val>
+        if self.next().kind != Tok.Y:
+            raise ValueError("expected y(0) = <value>")
+        if self.next().kind != Tok.LP:
+            raise ValueError("expected '(' after y")
+        # The initial point must be 0 (for now; y(a) with a!=0 is future work).
+        t0 = self.next()
+        if t0.kind != Tok.INT or t0.val != 0:
+            raise ValueError("only y(0) = <value> supported (initial point must be 0)")
+        if self.next().kind != Tok.RP:
+            raise ValueError("expected ')' after y(0")
+        if self.next().kind != Tok.EQ:
+            raise ValueError("expected '=' after y(0)")
+        # Value: INT or FLOAT (possibly negative)
+        neg = False
+        tv = self.next()
+        if tv.kind == Tok.MINUS:
+            neg = True
+            tv = self.next()
+        if tv.kind == Tok.INT:
+            ic_val = Fraction(-tv.val if neg else tv.val)
+        elif tv.kind == Tok.FLOAT:
+            ic_val = -tv.val if neg else tv.val
+        else:
+            raise ValueError("initial value must be a number")
+        if self.next().kind != Tok.COMMA:
+            raise ValueError("expected ',' after initial condition")
+        # deg = <d>
+        td = self.next()
+        if not (td.kind == Tok.IDENT and td.val == "deg"):
+            raise ValueError("expected deg = <n>")
+        if self.next().kind != Tok.EQ:
+            raise ValueError("expected '=' after deg")
+        tn = self.next()
+        if tn.kind != Tok.INT or tn.val <= 0:
+            raise ValueError("deg must be a positive integer")
+        deg = tn.val
+        if self.next().kind != Tok.RP:
+            raise ValueError("expected ')' at end of ode(...)")
+        # Separate RHS into a(x)*y + b(x). Reject nonlinear in y.
+        a_poly = {}  # {exp: Fraction} for a(x)
+        b_poly = {}  # {exp: Fraction} for b(x)
+        for (ex, ey), coeff in rhs.items():
+            if ey == 1:
+                a_poly[ex] = a_poly.get(ex, Fraction(0)) + coeff
+            elif ey == 0:
+                b_poly[ex] = b_poly.get(ex, Fraction(0)) + coeff
+            else:
+                raise ValueError(
+                    "only linear ODEs supported (y^%d not allowed)" % ey)
+        # Store spec; return dummy poly (Circuit uses spec directly).
+        self.ode_spec = {
+            'a_poly': a_poly,
+            'b_poly': b_poly,
+            'ic_val': ic_val,
+            'deg': deg,
+        }
+        return {0: _c(0)}  # dummy; not used
+
+    def _parse_bivariate(self):
+        """Parse a bivariate polynomial in x and y.
+        Returns {(ex, ey): Fraction}. Stops at COMMA, RP, or EQ.
+        """
+        result = {}
+        # Handle leading minus
+        neg = False
+        if self.peek() and self.peek().kind == Tok.MINUS:
+            self.next()
+            neg = True
+        result = self._parse_bivariate_term()
+        if neg:
+            result = {(ex, ey): -c for (ex, ey), c in result.items()}
+        while self.peek() and self.peek().kind in (Tok.PLUS, Tok.MINUS):
+            op = self.next()
+            term = self._parse_bivariate_term()
+            sign = 1 if op.kind == Tok.PLUS else -1
+            for k, c in term.items():
+                result[k] = result.get(k, Fraction(0)) + sign * c
+        # Clean zeros
+        return {k: c for k, c in result.items() if c != 0}
+
+    def _parse_bivariate_term(self):
+        """Parse a term: factor ('*' factor)*. Returns {(ex,ey): Fraction}."""
+        result = {(0, 0): Fraction(1)}
+        while True:
+            f = self._parse_bivariate_factor()
+            # Multiply result * f
+            new = {}
+            for (ex1, ey1), c1 in result.items():
+                for (ex2, ey2), c2 in f.items():
+                    k = (ex1 + ex2, ey1 + ey2)
+                    new[k] = new.get(k, Fraction(0)) + c1 * c2
+            result = new
+            if self.peek() and self.peek().kind == Tok.STAR:
+                self.next()
+            else:
+                break
+        return result
+
+    def _parse_bivariate_factor(self):
+        """Parse a factor: number | x | y | x^N | '(' expr ')'.
+        Returns {(ex,ey): Fraction}.
+        """
+        t = self.next()
+        if t.kind == Tok.INT:
+            return {(0, 0): Fraction(t.val)}
+        if t.kind == Tok.FLOAT:
+            return {(0, 0): t.val}
+        if t.kind == Tok.X:
+            # Check for ^N
+            if self.peek() and self.peek().kind == Tok.POW:
+                self.next()
+                te = self.next()
+                if te.kind != Tok.INT or te.val < 0:
+                    raise ValueError("exponent must be a non-negative integer")
+                return {(te.val, 0): Fraction(1)}
+            return {(1, 0): Fraction(1)}
+        if t.kind == Tok.Y:
+            # y^N? (we'll reject ey>1 later, but parse it)
+            if self.peek() and self.peek().kind == Tok.POW:
+                self.next()
+                te = self.next()
+                if te.kind != Tok.INT or te.val < 0:
+                    raise ValueError("exponent must be a non-negative integer")
+                return {(0, te.val): Fraction(1)}
+            return {(0, 1): Fraction(1)}
+        if t.kind == Tok.LP:
+            # '(' bivariate ')'
+            inner = self._parse_bivariate()
+            if self.next().kind != Tok.RP:
+                raise ValueError("missing ')'")
+            return inner
+        raise ValueError("unexpected token in ODE right-hand side")
 
     def parse_expr(self):
         node = self.parse_term()
@@ -552,14 +718,18 @@ _APPROX = {
 
 def parse_polynomial(eq_str):
     """Parse 'lhs = rhs' into ({exp: (re,im)} for lhs - rhs,
-    trans_used, float_seen, integral_spec).
+    trans_used, float_seen, integral_spec, ode_spec).
 
     integral_spec is None for non-integral equations, else a dict with
     'integrand' ({exp: (re,im)}), 'a' (Fraction), 'b' (Fraction).
+    ode_spec is None for non-ODE equations, else a dict with
+    'a_poly' ({exp: Fraction}), 'b_poly' ({exp: Fraction}),
+    'ic_val' (Fraction), 'deg' (int).
     """
     parser = Parser(tokenize(eq_str))
     poly = parser.parse_equation()
-    return poly, parser.trans_used, parser.float_seen, parser.integral_spec
+    return (poly, parser.trans_used, parser.float_seen,
+            parser.integral_spec, parser.ode_spec)
 
 
 # ---------------- canonical form ----------------
@@ -733,11 +903,12 @@ class Circuit:
     """
 
     def __init__(self, eq_str, poly, precision, trans_used, float_seen,
-                 force_complex=False, integral_spec=None):
+                 force_complex=False, integral_spec=None, ode_spec=None):
         self.eq_str = eq_str
         # Precision k is MANDATORY for every equation (parsed first).
         self.precision = _parse_precision(precision)
         self.integral_spec = integral_spec
+        self.ode_spec = ode_spec
         # Integral equations: FTC mode (bypass exact/tolerance selection).
         # The poly is {1: (±1,0), 0: (0,0)} (placeholder); FTC uses the
         # spec directly.
@@ -749,6 +920,14 @@ class Circuit:
             self._build_ftc(spec['integrand'], spec['a'], spec['b'])
             self.canonical = ("%s;k=%d" % (
                 self._integral_canon, self.precision))
+            return
+        # ODE equations: ode mode (bypass exact/tolerance selection).
+        if ode_spec is not None:
+            self.is_complex = False
+            self.mode = "ode"
+            self._build_ode(ode_spec)
+            self.canonical = ("%s;k=%d" % (
+                self._ode_canon, self.precision))
             return
         # Normalize overall sign so that "38 = x^3+2*x+5" and
         # "x^3+2*x+5 = 38" compile to the identical circuit and
@@ -1030,6 +1209,105 @@ class Circuit:
 
         self._densify(cons, n)
 
+    def _build_ode(self, spec):
+        """ODE circuit for ode(y' = a(x)*y + b(x), y(0) = v, deg = d).
+
+        Witness (private, in aL): c_0, c_1, ..., c_d (d+1 coefficients).
+        y(x) = Σ c_i x^i.
+
+        Constraints (all linear, zero multiplication gates):
+          For k = 0..d-1: (k+1)*c_{k+1} - Σ_{j=0}^{k} a_j*c_{k-j} - b_k = 0
+            (coefficient of x^k in y' - a(x)*y - b(x) vanishes;
+             i.e., residual is O(x^d))
+          c_0 = v  (initial condition y(0) = v)
+
+        All arithmetic exact in the field (Fractions via modular inverse).
+        The proof leaks nothing about the coefficients (Bulletproofs ZK).
+        """
+        a_poly = spec['a_poly']  # {exp: Fraction}
+        b_poly = spec['b_poly']  # {exp: Fraction}
+        ic_val = spec['ic_val']  # Fraction
+        d = spec['deg']  # int
+        # Witness count: d+1. n = next power of 2.
+        n_wit = d + 1
+        n = 1
+        while n < n_wit:
+            n *= 2
+        self.n = n
+        self._ode_degree = d
+        self._ode_a = a_poly
+        self._ode_b = b_poly
+        self._ode_ic = ic_val
+
+        cons = []
+
+        def gate(which, i, coeff, acc):
+            acc[which, i] = (acc.get((which, i), 0) + coeff) % N
+
+        def _field(fr):
+            """Fraction -> field element (exact via modular inverse)."""
+            return (fr.numerator * pow(fr.denominator, N - 2, N)) % N
+
+        # Constraint set 1: for k=0..d-1,
+        #   (k+1)*c_{k+1} - Σ_{j=0}^{k} a_j*c_{k-j} - b_k = 0.
+        for k in range(d):
+            acc = {}
+            # (k+1)*c_{k+1}
+            gate("L", k + 1, k + 1, acc)
+            # - Σ_{j=0}^{k} a_j * c_{k-j}
+            for j in range(k + 1):
+                a_j = a_poly.get(j, Fraction(0))
+                if a_j != 0:
+                    # c_{k-j} is aL[k-j]
+                    coeff = (-_field(a_j)) % N
+                    gate("L", k - j, coeff, acc)
+            # - b_k (constant term)
+            b_k = b_poly.get(k, Fraction(0))
+            cons.append((acc, _field(b_k)))
+
+        # Constraint set 2: c_0 = ic_val.
+        acc = {}
+        gate("L", 0, 1, acc)
+        cons.append((acc, _field(ic_val)))
+
+        self._densify(cons, n)
+        # Symbolic canonical (red line: no numeric coefficients).
+        # Format: ode(y'=<a>y+<b>,y(0)=<v>,deg=<d>)
+        def _poly_str(p):
+            if not p:
+                return "0"
+            terms = []
+            for e in sorted(p.keys()):
+                c = p[e]
+                cs = (str(c.numerator) if c.denominator == 1
+                      else "%d/%d" % (c.numerator, c.denominator))
+                if e == 0:
+                    terms.append(cs)
+                elif e == 1:
+                    terms.append("%s*x" % cs if cs not in ("1", "-1") else
+                                 ("x" if cs == "1" else "-x"))
+                else:
+                    terms.append("%s*x^%d" % (cs, e) if cs not in ("1", "-1") else
+                                 ("x^%d" % e if cs == "1" else "-x^%d" % e))
+            s = "+".join(terms).replace("+-", "-")
+            return s
+        a_str = _poly_str(a_poly)
+        b_str = _poly_str(b_poly)
+        # RHS = a(x)*y + b(x)
+        if a_poly and b_poly:
+            rhs_str = "%s*y+%s" % (a_str, b_str)
+        elif a_poly:
+            # a(x)*y, handle coefficient 1
+            rhs_str = "%s*y" % ("" if a_str == "1" else a_str)
+            if rhs_str.startswith("*"):
+                rhs_str = rhs_str[1:]
+        else:
+            rhs_str = b_str
+        rhs_str = rhs_str.replace("+-", "-")
+        ic_str = (str(ic_val.numerator) if ic_val.denominator == 1
+                  else "%d/%d" % (ic_val.numerator, ic_val.denominator))
+        self._ode_canon = "ode(y'=%s,y(0)=%s,deg=%d)" % (rhs_str, ic_str, d)
+
     def _process_integral(self, poly, spec):
         """Handle int(f,a,b): verify form, store spec for FTC.
         Form already verified in parse_equation (x = int(...) or
@@ -1198,6 +1476,12 @@ class Circuit:
             for j, w in enumerate(X):
                 aL[j] = w % N
             return aL, aR, aO
+        if self.mode == "ode":
+            # ODE: witness is [c_0..c_d] as field elements.
+            # All constraints are linear; aR/aO are zero.
+            for j, w in enumerate(X):
+                aL[j] = w % N
+            return aL, aR, aO
         if self.mode == "exact":
             if hasattr(self, '_exact_poly_c'):
                 # Complex exact: Horner with Karatsuba 3-mult.
@@ -1283,6 +1567,31 @@ class Circuit:
 
     def check_witness(self, X):
         """True iff X satisfies the equation (within precision)."""
+        if self.mode == "ode":
+            # ODE: X = [c_0..c_d] as field elements.
+            # Verify: (k+1)*c_{k+1} - Σ a_j*c_{k-j} - b_k = 0 for k<d,
+            # and c_0 = ic_val.
+            d = self._ode_degree
+            a_poly = self._ode_a
+            b_poly = self._ode_b
+            ic_val = self._ode_ic
+            def _field(fr):
+                return (fr.numerator * pow(fr.denominator, N - 2, N)) % N
+            # Check ODE residual coefficients
+            for k in range(d):
+                # (k+1)*c_{k+1}
+                lhs = ((k + 1) * (X[k + 1] % N)) % N
+                # - Σ_{j=0}^{k} a_j * c_{k-j}
+                for j in range(k + 1):
+                    a_j = a_poly.get(j, Fraction(0))
+                    if a_j != 0:
+                        lhs = (lhs - _field(a_j) * (X[k - j] % N)) % N
+                # Should equal b_k
+                b_k = b_poly.get(k, Fraction(0))
+                if lhs != _field(b_k):
+                    return False
+            # Check IC
+            return (X[0] % N) == _field(ic_val)
         if self.mode == "ftc":
             # FTC: X = [F_0..F_{d+1}, v] as field elements.
             # Verify: (j+1)*F_{j+1} = c_j, and v = Σ F_j*(b^j - a^j).
@@ -1374,6 +1683,7 @@ def compile(eq_str, precision, force_complex=False):
     Raises ValueError on syntax errors, unsatisfiable equations, or a
     missing/invalid precision.
     """
-    poly, trans_used, float_seen, integral_spec = parse_polynomial(eq_str)
+    poly, trans_used, float_seen, integral_spec, ode_spec = parse_polynomial(eq_str)
     return Circuit(eq_str, poly, precision, trans_used, float_seen,
-                   force_complex=force_complex, integral_spec=integral_spec)
+                   force_complex=force_complex, integral_spec=integral_spec,
+                   ode_spec=ode_spec)

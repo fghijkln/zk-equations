@@ -346,7 +346,7 @@ def solve_equation(eq_str, decimals=8, max_roots=5):
     """
     if not (1 <= decimals <= 12):
         raise ValueError("decimals must be between 1 and 12")
-    poly, trans_used, _, _ = circuit_mod.parse_polynomial(eq_str)
+    poly, trans_used, _, _, _ = circuit_mod.parse_polynomial(eq_str)
     if not poly:
         raise ValueError("empty equation")
     # Use complex root finder for all; real roots have im≈0.
@@ -401,6 +401,6 @@ def solve_equation(eq_str, decimals=8, max_roots=5):
 def all_roots(eq_str):
     """All real roots (full float precision) -- for the app-level
     precision check |w - r| < 1/k (k = user-supplied denominator)."""
-    poly, trans_used, _, _ = circuit_mod.parse_polynomial(eq_str)
+    poly, trans_used, _, _, _ = circuit_mod.parse_polynomial(eq_str)
     lo, hi = _meaningful_domain(eq_str, trans_used)
     return find_roots(poly, lo, hi)
