@@ -20,7 +20,7 @@ Pipeline (standard practice, see research notes):
 
 Accuracy: roots are polished in float (53-bit) to ~1e-12 residual;
 more than enough for the 8-decimal display and the app-level
-precision check |w - r| < 1/(k*10^4).
+precision check |w - r| < 1/k (k = user-supplied denominator).
 """
 
 import cmath
@@ -288,7 +288,7 @@ def solve_equation(eq_str, decimals=8, max_roots=5):
 
 def all_roots(eq_str):
     """All real roots (full float precision) -- for the app-level
-    precision check |w - r| < 1/(k*10^4)."""
+    precision check |w - r| < 1/k (k = user-supplied denominator)."""
     poly, trans_used, _ = circuit_mod.parse_polynomial(eq_str)
     lo, hi = _meaningful_domain(eq_str, trans_used)
     return find_roots(poly, lo, hi)

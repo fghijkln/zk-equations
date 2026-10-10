@@ -1,19 +1,18 @@
 """Public API: prove/verify knowledge of a solution to an equation.
 
-    proof = prove_equation("x^3 + 2*x + 5 = 38", 3)
-    verify_equation("x^3 + 2*x + 5 = 38", proof)   # True, reveals nothing about x
+    proof = prove_equation("x^3 + 2*x + 5 = 38", 3, "10000")
+    verify_equation("x^3 + 2*x + 5 = 38", proof, "10000")  # True
 
-    # transcendental / decimal equations need a precision denominator k.
-    # Strict definition: the witness must be within 1/(k*10^4) of an
-    # exact root; otherwise prove_equation refuses (raises ValueError).
-    # Use solve_equation to get accurate roots (8 decimals by default).
+    # Precision k is MANDATORY for every equation (no exceptions).
+    # Strict definition: the witness must be within 1/k of an exact
+    # root; otherwise prove_equation refuses (raises ValueError).
+    # Use solve_equation to get accurate roots.
     proof = prove_equation("sin(x) = 0.5", "0.52359878", "1000")
     verify_equation("sin(x) = 0.5", proof, "1000")  # True
 
 The proof is a plain dict of hex strings (JSON-serializable). Proofs are
-bound to the *canonical* equation (polynomial normal form): term-moved
-spellings of the same equation verify each other's proofs, genuinely
-different equations do not.
+bound to the *canonical* equation (polynomial normal form + ";k=<k>"):
+the same equation with a different k does NOT verify.
 """
 
 from fractions import Fraction
@@ -54,8 +53,18 @@ def _quantize(fr):
 
 def _check_precision(eq_str, w_frac, k):
     """Enforce the strict precision definition: the witness must be
-    within 1/(k*10^4) of an exact root. Raises ValueError otherwise."""
-    eps = 1.0 / (k * 10 ** 4)
+    within 1/k of an exact root, where k is the user-supplied precision
+    denominator. Raises ValueError otherwise.
+
+    The k used here is ALWAYS the user-supplied value (the definition),
+    never a value inferred from the proof.
+    """
+    # Vacuously true equation (zero polynomial): every x is a root,
+    # so any witness is within precision.
+    poly, _, _ = circuit_mod.parse_polynomial(eq_str)
+    if not poly or all(c == 0 for c in poly.values()):
+        return 0.0
+    eps = 1.0 / k
     roots = solve_mod.all_roots(eq_str)
     w = float(w_frac)
     best = min((abs(w - r) for r in roots), default=None)
@@ -63,58 +72,40 @@ def _check_precision(eq_str, w_frac, k):
         detail = ("no real root found"
                   if best is None else "distance %.3g" % best)
         raise ValueError(
-            "witness is not within precision 1/(%d*10^4)=%.3g of an exact "
+            "witness is not within precision 1/%d=%.3g of an exact "
             "root (%s); use the solver to get an accurate root"
             % (k, eps, detail))
     return best
 
 
-def prove_equation(eq_str, witness, precision=""):
+def prove_equation(eq_str, witness, precision):
     """Prove knowledge of `witness` satisfying `eq_str`.
 
-    witness: int (exact mode) or decimal string (tolerance mode, up to
-             12 decimal places; an int is also accepted).
-    precision: k (int/str), required in tolerance mode. Strict
-               definition: the witness must be within 1/(k*10^4) of an
-               exact root, else ValueError ("refuse"). Ignored in exact
-               mode.
+    witness: decimal string (up to 12 decimal places); an int is also
+             accepted (e.g. 3 or "3").
+    precision: k (int/str), MANDATORY for every equation (no exceptions,
+               regardless of whether the roots are infinite decimals).
+               Strict definition: the witness must be within 1/k of an
+               exact root, else ValueError ("refuse").
     Raises ValueError if the equation is malformed, the precision is
     missing/invalid, or the witness does not satisfy (within precision).
     """
+    if not str(precision).strip():
+        raise ValueError("precision k is required for every equation")
     circ = circuit_mod.compile(eq_str, precision)
-    if circ.mode == "exact":
-        if isinstance(witness, int):
-            w = witness
-        else:
-            s = str(witness).strip()
-            try:
-                fr = Fraction(s)
-            except (ValueError, ZeroDivisionError):
-                fr = None
-            if fr is not None and fr.denominator == 1:
-                # "3", "3.0", "3.0000000000" (e.g. tapped from the
-                # solver) are all the integer 3
-                w = int(fr)
-            else:
-                raise ValueError(
-                    "witness must be an integer for this exact equation; "
-                    "for a decimal witness, write the equation with decimals "
-                    "(e.g. x^5 = 1.0) and set precision k")
-        if not circ.check_witness(w):
-            raise ValueError("witness does not satisfy the equation")
-        aL, aR, aO = circ.evaluate(w)
-    else:
-        w_frac = _parse_witness_full(witness)
-        _check_precision(eq_str, w_frac, circ.precision)
-        X = _quantize(w_frac)
-        if not circ.check_witness(X):
-            raise ValueError(
-                "witness does not satisfy within 1/%d" % circ.precision)
-        aL, aR, aO = circ.evaluate(X)
+    k = circ.precision  # int, from the user-supplied definition (1/k)
+    w_frac = _parse_witness_full(witness)
+    _check_precision(eq_str, w_frac, k)
+    X = _quantize(w_frac)
+    if not circ.check_witness(X):
+        raise ValueError(
+            "witness does not satisfy within 1/%d" % k)
+    aL, aR, aO = circ.evaluate(X)
     assert circ.check_constraints(aL, aR, aO), "compiler bug: bad witness wires"
     proof = bulletproof.prove(circ, aL, aR, aO)
     proof["equation"] = circ.canonical
-    proof["precision"] = circ.precision  # int k, or None in exact mode
+    proof["precision"] = k  # informational only; verifiers MUST NOT
+    # rely on it -- verify_equation requires k as explicit input
     return proof
 
 
@@ -148,19 +139,26 @@ def solve_equation(eq_str, decimals=8):
     return out
 
 
-def verify_equation(eq_str, proof, precision=""):
+def verify_equation(eq_str, proof, precision):
     """Verify a proof against an equation string. Returns True/False.
 
-    precision: k for tolerance equations; if empty, it is taken from the
-    proof itself. Returns False (rather than raising) on any malformed
-    proof, a canonical-equation mismatch (covers moved-term spellings),
+    precision: k (int/str), MANDATORY. The verifier must supply the
+    precision explicitly; it is NEVER taken from the proof itself.
+    (Reading k from the proof would let a malicious prover weaken the
+    requirement.) Returns False (rather than raising) on any malformed
+    proof, a canonical-equation mismatch (covers moved-term spellings
+    AND precision mismatches, since canonical includes ";k=<k>"),
     or a precision mismatch.
+    Raises ValueError if precision is missing/invalid (caller error).
     """
+    if not str(precision).strip():
+        raise ValueError("precision k is required to verify")
     try:
         if not isinstance(proof, dict):
             return False
-        k = str(precision).strip() or proof.get("precision")
-        circ = circuit_mod.compile(eq_str, k if k is not None else "")
+        # NOTE: k comes ONLY from the caller's explicit input (the
+        # definition), NEVER from proof.get("precision").
+        circ = circuit_mod.compile(eq_str, str(precision).strip())
         if proof.get("equation") != circ.canonical:
             return False
         return bulletproof.verify(circ, proof)

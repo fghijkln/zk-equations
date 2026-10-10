@@ -21,9 +21,9 @@ def _err(msg):
 def prove(equation, witness, precision=""):
     """Prove knowledge of `witness` for `equation`.
 
-    witness: integer string (exact mode) or decimal string (tolerance).
-    precision: k as string; required in tolerance mode (final precision
-    1/k), ignored in exact mode.
+    witness: decimal string (up to 12 places); an int is also accepted.
+    precision: k as string, MANDATORY for every equation (final precision
+    1/k: witness must be within 1/k of an exact root).
     """
     try:
         proof = zk.prove_equation(equation.strip(), witness.strip(),
@@ -38,7 +38,8 @@ def prove(equation, witness, precision=""):
 def verify(equation, proof_json, precision=""):
     """Verify a proof (JSON string) against `equation`.
 
-    precision: k as string; if empty, taken from the proof itself.
+    precision: k as string, MANDATORY (must match the k used at prove
+    time). Never taken from the proof itself.
     """
     try:
         proof = json.loads(proof_json)

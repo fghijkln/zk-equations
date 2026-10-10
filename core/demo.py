@@ -15,11 +15,13 @@ from . import api
 def main():
     eq = "x^3 + 2*x + 5 = 38"
     x = 3
+    k = "10000"  # precision: mandatory for every equation; |w - r| < 1/k
     print("equation :", eq)
     print("witness  : x = %d  (kept secret from the verifier)" % x)
+    print("precision: k = %s (final precision 1/%s)" % (k, k))
 
     t0 = time.time()
-    proof = api.prove_equation(eq, x)
+    proof = api.prove_equation(eq, x, k)
     t_prove = time.time() - t0
     print("prove    : %.2fs" % t_prove)
 
@@ -27,31 +29,31 @@ def main():
     print("proof size: %d bytes JSON" % size)
 
     t0 = time.time()
-    ok = api.verify_equation(eq, proof)
+    ok = api.verify_equation(eq, proof, k)
     t_verify = time.time() - t0
     print("verify   : %.2fs -> %s" % (t_verify, ok))
     assert ok, "honest proof must verify"
 
     # A wrong witness must be refused at prove time...
     try:
-        api.prove_equation("x^3 + 2*x + 5 = 42", 3)
+        api.prove_equation("x^3 + 2*x + 5 = 42", 3, k)
         print("ERROR: bad witness was accepted!")
     except ValueError as e:
         print("bad witness correctly refused: %s" % e)
 
     # ...and a proof for one equation must not verify against another.
-    ok2 = api.verify_equation("x^3 + 2*x + 5 = 42", proof)
+    ok2 = api.verify_equation("x^3 + 2*x + 5 = 42", proof, k)
     print("proof replayed against '= 42' verifies: %s (must be False)" % ok2)
     assert not ok2
 
     # ...but a term-moved spelling of the SAME equation verifies fine.
-    ok3 = api.verify_equation("x^3 + 2*x = 33", proof)
+    ok3 = api.verify_equation("x^3 + 2*x = 33", proof, k)
     print("term-moved 'x^3 + 2*x = 33' verifies: %s (must be True)" % ok3)
     assert ok3
 
-    # Transcendental equation: sin(x) = 0.5, precision 1/(1000*10^4).
+    # Transcendental equation: sin(x) = 0.5, precision 1/1000.
     print()
-    print("equation : sin(x) = 0.5   (precision k = 1000, i.e. 1/(k*10^4))")
+    print("equation : sin(x) = 0.5   (precision k = 1000, i.e. 1/k)")
     w = api.solve_equation("sin(x) = 0.5", decimals=8)[0]
     print("witness  : x = %s  (kept secret from the verifier)" % w)
     t0 = time.time()

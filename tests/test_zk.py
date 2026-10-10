@@ -32,6 +32,8 @@ def expect_raises(name, fn):
 
 
 # ---------------- 1. honest proofs verify ----------------
+# Precision k is mandatory for every equation (final precision 1/k).
+K = "1000"
 
 CASES = [
     ("x^3 + 2*x + 5 = 38", 3),
@@ -53,13 +55,13 @@ CASES = [
 
 for eq, w in CASES:
     t0 = time.time()
-    proof = api.prove_equation(eq, w)
+    proof = api.prove_equation(eq, w, K)
     tp = time.time() - t0
     t0 = time.time()
-    ok = api.verify_equation(eq, proof)
+    ok = api.verify_equation(eq, proof, K)
     tv = time.time() - t0
     # JSON round-trip must preserve verifiability
-    ok2 = api.verify_equation(eq, json.loads(json.dumps(proof)))
+    ok2 = api.verify_equation(eq, json.loads(json.dumps(proof)), K)
     check("honest %-28s x=%-6d verifies (prove %.2fs, verify %.2fs, json-ok)"
           % (eq, w, tp, tv), ok and ok2)
 
@@ -67,24 +69,31 @@ for eq, w in CASES:
 
 for eq, w in [("x^3 + 2*x + 5 = 38", 4), ("x^2 = 16", 5), ("x + 5 = 8", 0)]:
     expect_raises("bad witness refused: %s x=%d" % (eq, w),
-                  lambda: api.prove_equation(eq, w))
+                  lambda: api.prove_equation(eq, w, K))
 
 # unsatifiable constant equation is a compile error
 expect_raises("constant-false equation rejected",
-              lambda: api.prove_equation("3 = 4", 0))
+              lambda: api.prove_equation("3 = 4", 0, K))
 
 # malformed equations are compile errors
 for bad in ["x^2 = ", "= 5", "x + = 3", "2y + 1 = 5", "x^(-1) = 2", "x^2 == 4"]:
     expect_raises("malformed rejected: %r" % bad,
-                  lambda: api.prove_equation(bad, 1))
+                  lambda: api.prove_equation(bad, 1, K))
+
+# precision is mandatory for every equation (no exceptions)
+expect_raises("prove without precision refused",
+              lambda: api.prove_equation("x^3 + 2*x + 5 = 38", 3, ""))
+expect_raises("prove with blank precision refused",
+              lambda: api.prove_equation("x^2 = 16", 4, "   "))
 
 # ---------------- 3. soundness at the protocol level ----------------
 # Bypass the API's witness check: feed bad wires straight into the prover.
 # A cheating prover must still fail verification.
 
 eq, w = "x^3 + 2*x + 5 = 38", 3
-circ = circuit_mod.compile(eq)
-aL, aR, aO = circ.evaluate(w)
+circ = circuit_mod.compile(eq, K)
+X = w * 10000  # tolerance mode: scaled integer witness (x = X / M_DEC)
+aL, aR, aO = circ.evaluate(X)
 
 # 3a. break the Hadamard constraint (aO[0] is x^2 = 9 -> 10)
 bL, bR, bO = list(aL), list(aR), list(aO)
@@ -94,13 +103,13 @@ check("broken Hadamard gate -> verify False",
       bulletproof.verify(circ, pf) is False)
 
 # 3b. break a linear constraint (use x=4's wires but keep equation)
-aL4, aR4, aO4 = circ.evaluate(4)
+aL4, aR4, aO4 = circ.evaluate(4 * 10000)
 pf = bulletproof.prove(circ, aL4, aR4, aO4)
 check("wires for x=4 against '=38' circuit -> verify False",
       bulletproof.verify(circ, pf) is False)
 
 # 3c. tamper every top-level proof field
-good = api.prove_equation(eq, w)
+good = api.prove_equation(eq, w, K)
 
 
 def tampered(path, mutate):
@@ -133,36 +142,36 @@ tamper_cases = [
 for path, mut in tamper_cases:
     p = tampered(path, mut)
     check("tamper %s -> verify False" % ".".join(map(str, path)),
-          api.verify_equation(eq, p) is False)
+          api.verify_equation(eq, p, K) is False)
 
 # garbage / truncated proofs must not raise, just return False
-check("empty dict -> False", api.verify_equation(eq, {}) is False)
+check("empty dict -> False", api.verify_equation(eq, {}, K) is False)
 check("garbage hex -> False",
-      api.verify_equation(eq, tampered(["AI"], lambda h: "zz")) is False)
+      api.verify_equation(eq, tampered(["AI"], lambda h: "zz"), K) is False)
 p = copy.deepcopy(good)
 del p["ipa"]
-check("missing ipa section -> False", api.verify_equation(eq, p) is False)
+check("missing ipa section -> False", api.verify_equation(eq, p, K) is False)
 
 # proof bound to its equation
 check("equation mismatch -> False",
-      api.verify_equation("x^3 + 2*x + 5 = 39", good) is False)
+      api.verify_equation("x^3 + 2*x + 5 = 39", good, K) is False)
 
 # ---------------- 4. zero-knowledge sanity ----------------
 # proofs are randomized: two proofs of the same statement differ
-p1 = api.prove_equation(eq, w)
-p2 = api.prove_equation(eq, w)
+p1 = api.prove_equation(eq, w, K)
+p2 = api.prove_equation(eq, w, K)
 check("proofs are randomized (AI differs)",
       p1["AI"] != p2["AI"] and p1["S"] != p2["S"])
 check("both randomized proofs verify",
-      api.verify_equation(eq, p1) and api.verify_equation(eq, p2))
+      api.verify_equation(eq, p1, K) and api.verify_equation(eq, p2, K))
 
 # ---------------- 5. scaling spot check ----------------
 eq_big = "x^9 + x^7 - 3*x^4 + 2*x = 596"   # x=2: 512+128-48+4 = 596
 t0 = time.time()
-pb = api.prove_equation(eq_big, 2)
+pb = api.prove_equation(eq_big, 2, K)
 tp = time.time() - t0
 t0 = time.time()
-ok = api.verify_equation(eq_big, pb)
+ok = api.verify_equation(eq_big, pb, K)
 tv = time.time() - t0
 check("degree-9 equation verifies (prove %.2fs, verify %.2fs)" % (tp, tv), ok)
 
@@ -170,20 +179,21 @@ check("degree-9 equation verifies (prove %.2fs, verify %.2fs)" % (tp, tv), ok)
 # (regression test for the "moved term shows as failed" bug: proofs are
 # bound to the polynomial normal form, not the raw string)
 
-pm = api.prove_equation("x^3 + 2*x + 5 = 38", 3)
-check("moved term verifies", api.verify_equation("x^3 + 2*x = 33", pm))
+pm = api.prove_equation("x^3 + 2*x + 5 = 38", 3, K)
+check("moved term verifies", api.verify_equation("x^3 + 2*x = 33", pm, K))
 check("reordered verifies",
-      api.verify_equation("38 = x^3 + 2*x + 5", pm))
+      api.verify_equation("38 = x^3 + 2*x + 5", pm, K))
 check("different equation still fails",
-      api.verify_equation("x^3 + 2*x + 5 = 39", pm) is False)
+      api.verify_equation("x^3 + 2*x + 5 = 39", pm, K) is False)
 check("scaled (different poly) still fails",
-      api.verify_equation("2*x^3 + 4*x + 10 = 76", pm) is False)
+      api.verify_equation("2*x^3 + 4*x + 10 = 76", pm, K) is False)
 
-# ---------------- 7. tolerance mode: decimals & transcendental ----------------
+# ---------------- 7. precision: mandatory, by definition ----------------
+# Final precision is 1/k (k = user-supplied denominator). The witness
+# must be within 1/k of an exact root. The verifier MUST supply k
+# explicitly; it is NEVER taken from the proof.
 
 t0 = time.time()
-# witnesses come from the solver (8 decimals), as the strict precision
-# 1/(k*10^4) requires
 w_sin = api.solve_equation("sin(x) = 0.5", decimals=8)[0]
 pt = api.prove_equation("sin(x) = 0.5", w_sin, "1000")
 tpt = time.time() - t0
@@ -191,7 +201,10 @@ t0 = time.time()
 okt = api.verify_equation("sin(x) = 0.5", pt, "1000")
 tvt = time.time() - t0
 check("sin(x)=0.5 @1/1000 verifies (prove %.1fs, verify %.1fs)" % (tpt, tvt),
-      okt and api.verify_equation("sin(x) = 0.5", pt))  # k from proof
+      okt)
+# verify WITHOUT k must raise (never fall back to the proof's k)
+expect_raises("verify without precision raises",
+              lambda: api.verify_equation("sin(x) = 0.5", pt, ""))
 check("sin moved term verifies",
       api.verify_equation("sin(x) - 0.5 = 0", pt, "1000"))
 check("sin wrong k fails",
@@ -223,9 +236,10 @@ pcheb = api.prove_equation("cos(x) = 0.5",
 check("cos(x)=0.5 @1/1000 verifies",
       api.verify_equation("cos(x) = 0.5", pcheb, "1000"))
 
-# strict precision: witness must be within 1/(k*10^4) of an exact root
-expect_raises("4-decimal witness now refused (not within 1/(k*10^4))",
-              lambda: api.prove_equation("sin(x) = 0.5", "0.5236", "1000"))
+# strict precision: witness must be within 1/k of an exact root.
+# sin(x)=0.5 root is ~0.5235987756; "0.53" is ~0.0014 away > 1/1000.
+expect_raises("witness beyond 1/k refused",
+              lambda: api.prove_equation("sin(x) = 0.5", "0.53", "1000"))
 expect_raises("13-decimal witness refused",
               lambda: api.prove_equation("sin(x) = 0.5", "0.5235987755983",
                                         "1000"))
@@ -249,40 +263,38 @@ check("solver double root -> single '0'",
 # exact equation: solver returns plain integer; tapping it proves fine
 check("solver exact eq returns '3'",
       api.solve_equation("x^3 + 2*x + 5 = 38", decimals=10) == ["3"])
-pex = api.prove_equation("x^3 + 2*x + 5 = 38", "3")
+pex = api.prove_equation("x^3 + 2*x + 5 = 38", "3", K)
 check("tapped integer witness proves",
-      api.verify_equation("x^3 + 2*x + 5 = 38", pex))
-pex2 = api.prove_equation("x^3 + 2*x + 5 = 38", "3.0000000000")
+      api.verify_equation("x^3 + 2*x + 5 = 38", pex, K))
+pex2 = api.prove_equation("x^3 + 2*x + 5 = 38", "3.0000000000", K)
 check("decimal-form integer witness proves",
-      api.verify_equation("x^3 + 2*x + 5 = 38", pex2))
-expect_raises("non-integer witness refused in exact mode",
-              lambda: api.prove_equation("x^3 + 2*x + 5 = 38", "3.5"))
+      api.verify_equation("x^3 + 2*x + 5 = 38", pex2, K))
+# non-integer witness far from any root is refused (by precision 1/k,
+# not by a mode check -- there is no more "exact mode")
+expect_raises("non-integer witness far from root refused",
+              lambda: api.prove_equation("x^3 + 2*x + 5 = 38", "3.5", K))
 
-# tampering with the embedded precision must fail (k falls back to the
-# proof's own value, so the canonical form mismatches)
+# the proof's "precision" field is informational only: tampering with it
+# must NOT affect verification, which uses the caller-supplied k
+# (the definition), never the proof's value
 pt2 = copy.deepcopy(pt)
 pt2["precision"] = 100
-check("tampered precision -> False",
-      api.verify_equation("sin(x) = 0.5", pt2) is False)
+check("tampered proof precision field ignored (explicit k verifies)",
+      api.verify_equation("sin(x) = 0.5", pt2, "1000"))
+check("tampered proof precision + wrong k still fails",
+      api.verify_equation("sin(x) = 0.5", pt2, "100") is False)
 
-# ---------------- 8. exact/tolerance mode agreement ----------------
-# exact equation + decimal witness -> friendly error, not a raw int() crash
-try:
-    api.prove_equation("x^5=1", "1.001", "1000")
-    check("decimal witness on exact equation refused", False)
-except ValueError as e:
-    check("decimal witness on exact equation refused",
-          "integer" in str(e) and "invalid literal" not in str(e))
-# exact equation with a (now ignored) precision still works
-pe = api.prove_equation("x^5=1", 1, "1000")
-check("exact equation ignores precision",
-      api.verify_equation("x^5=1", pe))
-# decimal equation forces tolerance mode and requires k
-expect_raises("decimal equation without precision refused",
-              lambda: api.prove_equation("x^5 = 1.0", "1.0", ""))
+# ---------------- 8. no mode split: precision always mandatory ----------------
+# (replaces the old exact/tolerance agreement tests)
+expect_raises("integer equation without precision refused",
+              lambda: api.prove_equation("x^5=1", 1, ""))
 pt5 = api.prove_equation("x^5 = 1.0", "1.0", "1000")
 check("x^5=1.0 @1/1000 verifies",
       api.verify_equation("x^5 = 1.0", pt5, "1000"))
+# integer equation with explicit precision works like any other
+pe = api.prove_equation("x^5=1", 1, "1000")
+check("integer equation with precision verifies",
+      api.verify_equation("x^5=1", pe, "1000"))
 
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))

@@ -16,25 +16,19 @@ ln 6.1e-9 on [1, 2] (deg 9). No in-circuit range reduction is done
 proof stays valid but is about the polynomial, not the true function.
 ln is singular at 0: it is only meaningful on [1, 2] (hard restriction).
 
-Two modes, chosen automatically:
-  exact:     the equation is an integer polynomial (no decimals, no
-             transcendental functions). Proved exactly, mod n.
-  tolerance: decimals or transcendental functions present. The user
-             supplies a precision denominator k with the strict meaning:
-                 the witness is within 1/(k*10^4) of an exact root,
-             enforced by the prover (numerical solve + distance check;
-             a bad witness is refused, never proven). The circuit itself
-             works in 4 fixed decimal places (integers = value * 10^4;
-             the witness is quantized to 4 places) and proves
-                 |P(X)| <= B   i.e.   |T(x) - y| < 1/k,
-             where P is the scaled integer polynomial, B = ceil(S/k)-1,
-             S the scale factor. |X| <= 5*10^4 is range-checked so the
-             mod-n arithmetic faithfully represents integer arithmetic.
-             |P(X)| <= B is enforced by bit-decomposing u = P(X)+B.
-             (Why not 1/(k*10^4) in-circuit? An 8-decimal witness needs
-             a 10^8 scale; the Chebyshev coefficients' tiny high-degree
-             terms would underflow the field. The distance guarantee is
-             an honest-prover property, checked before proving.)
+Single mode: every equation requires a user-supplied precision
+denominator k (no automatic exact/tolerance detection). Strict
+definition, enforced by the prover before proving:
+    the witness is within 1/k of an exact root,
+otherwise the witness is refused (ValueError), never proven.
+The circuit itself works in 4 fixed decimal places
+(integers = value * 10^4; the witness is quantized to 4 places)
+and proves
+    |P(X)| <= B   i.e.   |T(x) - y| < 1/k,
+where P is the scaled integer polynomial, B = ceil(S/k)-1,
+S the scale factor. |X| <= 5*10^4 is range-checked so the
+mod-n arithmetic faithfully represents integer arithmetic.
+|P(X)| <= B is enforced by bit-decomposing u = P(X)+B.
 
 Proofs are bound to the *canonical* equation (polynomial normal form),
 so "x^3+2*x+5=38" and the term-moved "x^3+2*x=33" verify each other's
@@ -462,12 +456,12 @@ class Circuit:
       q: number of linear constraints
       WL, WR, WO: q x n matrices (list of q rows of n scalars mod N)
       c: length-q RHS vector
-      mode: "exact" | "tolerance"
-      precision: k (int) in tolerance mode, else None
+      precision: k (int), always required (final precision 1/k)
       canonical: canonical equation string the proof is bound to
+                 (includes ";k=<k>")
     """
 
-    def __init__(self, eq_str, poly, precision, trans_used, float_seen):
+    def __init__(self, eq_str, poly, precision):
         self.eq_str = eq_str
         # Normalize overall sign (leading coefficient positive) so that
         # "38 = x^3+2*x+5" and "x^3+2*x+5 = 38" compile to the identical
@@ -476,82 +470,12 @@ class Circuit:
             lc = poly[max(poly.keys())]
             if lc < 0:
                 poly = {e: -c for e, c in poly.items()}
-        # Any decimal literal (even "1.0") or transcendental function
-        # selects tolerance mode: what you write is what you get.
-        needs_tol = (trans_used or float_seen
-                     or any(c.denominator != 1 for c in poly.values()))
-        if not needs_tol:
-            self.mode = "exact"
-            self.precision = None
-            poly_int = {e: int(c) % N for e, c in poly.items() if c != 0}
-            self._build_exact(poly_int)
-            self.canonical = _canon_poly(
-                {e: _to_signed(v) for e, v in poly_int.items()})
-        else:
-            self.mode = "tolerance"
-            self.precision = _parse_precision(precision)
-            self._build_tolerance(poly, self.precision)
-            self.canonical = ("%s;k=%d"
-                              % (_canon_poly_frac(poly), self.precision))
-
-    # ---- exact mode (unchanged semantics) ----
-
-    def _build_exact(self, poly):
-        self._exact_poly = poly
-        self.degree = max(poly.keys()) if poly else 0
-        d = self.degree
-        if d >= 2:
-            n_real = d - 1
-        else:
-            n_real = 1
-        n = 1
-        while n < n_real:
-            n *= 2
-        self.n = n
-
-        cons = []
-
-        def gate(which, i, coeff, acc):
-            acc[which, i] = (acc.get((which, i), 0) + coeff) % N
-
-        if d >= 2:
-            for k in range(1, d - 1):
-                acc = {}
-                gate("L", k, 1, acc)
-                gate("O", k - 1, N - 1, acc)
-                cons.append((acc, 0))          # a_L[k] = a_O[k-1]
-            for k in range(0, d - 1):
-                acc = {}
-                gate("R", k, 1, acc)
-                gate("L", 0, N - 1, acc)
-                cons.append((acc, 0))          # a_R[k] = a_L[0] (= x)
-            acc = {}
-            for exp, coeff in poly.items():
-                if exp == 0:
-                    continue
-                if exp == 1:
-                    gate("L", 0, coeff, acc)
-                else:
-                    gate("O", exp - 2, coeff, acc)
-            cons.append((acc, (-poly.get(0, 0)) % N))  # main equation
-        elif d == 1:
-            c1 = poly.get(1, 0)
-            acc = {}
-            gate("R", 0, 1, acc)
-            cons.append((acc, 1))              # a_R[0] = 1
-            acc = {}
-            gate("O", 0, 1, acc)
-            gate("L", 0, N - 1, acc)
-            cons.append((acc, 0))              # a_O[0] = a_L[0]
-            acc = {}
-            gate("L", 0, c1, acc)
-            cons.append((acc, (-poly.get(0, 0)) % N))  # c1*x = -c0
-        else:  # d == 0: constant equation
-            if poly.get(0, 0) % N != 0:
-                raise ValueError("equation has no solution (constant false)")
-            # trivially true: no constraints (dummy zero gate)
-
-        self._densify(cons, n)
+        # Single mode: precision k is mandatory for every equation.
+        # No exact/tolerance auto-detection.
+        self.precision = _parse_precision(precision)
+        self._build_tolerance(poly, self.precision)
+        self.canonical = ("%s;k=%d"
+                          % (_canon_poly_frac(poly), self.precision))
 
     # ---- tolerance mode ----
 
@@ -675,31 +599,12 @@ class Circuit:
     def evaluate(self, X):
         """Wire values for witness X: returns (a_L, a_R, a_O).
 
-        Exact mode: X is the integer witness.
-        Tolerance mode: X is the scaled integer witness (x = X / M_DEC).
+        X is the scaled integer witness (x = X / M_DEC).
         """
         n = self.n
         aL = [0] * n
         aR = [0] * n
         aO = [0] * n
-        if self.mode == "exact":
-            X = X % N
-            d = self.degree
-            if d >= 2:
-                pw = [1] * (d + 1)
-                for kk in range(1, d + 1):
-                    pw[kk] = (pw[kk - 1] * X) % N
-                for kk in range(d - 1):
-                    aL[kk] = pw[kk + 1]
-                    aR[kk] = pw[1]
-                    aO[kk] = pw[kk + 2]
-            elif d == 1:
-                aL[0] = X
-                aR[0] = 1
-                aO[0] = X
-            return aL, aR, aO
-
-        # tolerance mode
         X = int(X)
         d = self._tol_d
         a = self._tol_a
@@ -739,13 +644,7 @@ class Circuit:
         return aL, aR, aO
 
     def check_witness(self, X):
-        """True iff X satisfies the equation (within precision)."""
-        if self.mode == "exact":
-            X = X % N
-            v = 0
-            for exp, coeff in self._exact_poly.items():
-                v = (v + coeff * pow(X, exp, N)) % N
-            return v == 0
+        """True iff X satisfies the equation (within precision 1/k)."""
         X = int(X)
         d = self._tol_d
         if d == 0:
@@ -781,13 +680,14 @@ def _parse_precision(precision):
     return k
 
 
-def compile(eq_str, precision=""):
+def compile(eq_str, precision):
     """Compile an equation string into a Circuit.
 
-    precision: k as int/str; required iff the equation needs tolerance
-    mode (decimals or transcendental functions). Final precision is 1/k.
+    precision: k as int/str; MANDATORY for every equation (no exceptions).
+    Final precision is 1/k: the witness must be within 1/k of an exact
+    root (enforced by the prover before proving).
     Raises ValueError on syntax errors, unsatisfiable equations, or a
     missing/invalid precision.
     """
-    poly, trans_used, float_seen = parse_polynomial(eq_str)
-    return Circuit(eq_str, poly, precision, trans_used, float_seen)
+    poly, _, _ = parse_polynomial(eq_str)
+    return Circuit(eq_str, poly, precision)
