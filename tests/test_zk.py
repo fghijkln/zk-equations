@@ -92,8 +92,8 @@ expect_raises("prove with blank precision refused",
 
 eq, w = "x^3 + 2*x + 5 = 38", 3
 circ = circuit_mod.compile(eq, K)
-X = w * 10000  # tolerance mode: scaled integer witness (x = X / M_DEC)
-aL, aR, aO = circ.evaluate(X)
+assert circ.mode == "exact"  # integer polynomial -> small exact circuit
+aL, aR, aO = circ.evaluate(w)  # exact mode: integer witness directly
 
 # 3a. break the Hadamard constraint (aO[0] is x^2 = 9 -> 10)
 bL, bR, bO = list(aL), list(aR), list(aO)
@@ -103,7 +103,7 @@ check("broken Hadamard gate -> verify False",
       bulletproof.verify(circ, pf) is False)
 
 # 3b. break a linear constraint (use x=4's wires but keep equation)
-aL4, aR4, aO4 = circ.evaluate(4 * 10000)
+aL4, aR4, aO4 = circ.evaluate(4)
 pf = bulletproof.prove(circ, aL4, aR4, aO4)
 check("wires for x=4 against '=38' circuit -> verify False",
       bulletproof.verify(circ, pf) is False)
@@ -269,9 +269,9 @@ check("tapped integer witness proves",
 pex2 = api.prove_equation("x^3 + 2*x + 5 = 38", "3.0000000000", K)
 check("decimal-form integer witness proves",
       api.verify_equation("x^3 + 2*x + 5 = 38", pex2, K))
-# non-integer witness far from any root is refused (by precision 1/k,
-# not by a mode check -- there is no more "exact mode")
-expect_raises("non-integer witness far from root refused",
+# non-integer witness for an integer equation is refused (exact circuit
+# needs an integer witness; write the equation with decimals for that)
+expect_raises("non-integer witness refused for integer equation",
               lambda: api.prove_equation("x^3 + 2*x + 5 = 38", "3.5", K))
 
 # the proof's "precision" field is informational only: tampering with it
@@ -284,17 +284,24 @@ check("tampered proof precision field ignored (explicit k verifies)",
 check("tampered proof precision + wrong k still fails",
       api.verify_equation("sin(x) = 0.5", pt2, "100") is False)
 
-# ---------------- 8. no mode split: precision always mandatory ----------------
-# (replaces the old exact/tolerance agreement tests)
+# ---------------- 8. precision mandatory in both modes ----------------
+# k is required for every equation; the circuit mode (exact/tolerance)
+# is a pure size optimization chosen from the equation alone.
 expect_raises("integer equation without precision refused",
               lambda: api.prove_equation("x^5=1", 1, ""))
+expect_raises("verify without precision raises",
+              lambda: api.verify_equation(
+                  "x^5=1", api.prove_equation("x^5=1", 1, "1000"), ""))
 pt5 = api.prove_equation("x^5 = 1.0", "1.0", "1000")
 check("x^5=1.0 @1/1000 verifies",
       api.verify_equation("x^5 = 1.0", pt5, "1000"))
-# integer equation with explicit precision works like any other
+# integer equation with explicit precision works (exact circuit + 1/k check)
 pe = api.prove_equation("x^5=1", 1, "1000")
 check("integer equation with precision verifies",
       api.verify_equation("x^5=1", pe, "1000"))
+# decimal witness for integer equation: helpful error, not a crash
+expect_raises("decimal witness for integer equation refused",
+              lambda: api.prove_equation("x^2 = 2", "1.41421356", "1000"))
 
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))

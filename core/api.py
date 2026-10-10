@@ -94,13 +94,28 @@ def prove_equation(eq_str, witness, precision):
         raise ValueError("precision k is required for every equation")
     circ = circuit_mod.compile(eq_str, precision)
     k = circ.precision  # int, from the user-supplied definition (1/k)
+    # Strict pre-check (the definition) applies to every equation:
+    # |witness - exact root| < 1/k.
     w_frac = _parse_witness_full(witness)
     _check_precision(eq_str, w_frac, k)
-    X = _quantize(w_frac)
-    if not circ.check_witness(X):
-        raise ValueError(
-            "witness does not satisfy within 1/%d" % k)
-    aL, aR, aO = circ.evaluate(X)
+    if circ.mode == "exact":
+        # Integer polynomial: the circuit proves exact equality, so the
+        # witness must be integer-valued (e.g. 3, "3", "3.0").
+        if w_frac.denominator != 1:
+            raise ValueError(
+                "witness must be an integer for this integer equation; "
+                "for a decimal witness, write the equation with decimals "
+                "(e.g. x^2 = 2.0)")
+        w = int(w_frac)
+        if not circ.check_witness(w):
+            raise ValueError("witness does not satisfy the equation")
+        aL, aR, aO = circ.evaluate(w)
+    else:
+        X = _quantize(w_frac)
+        if not circ.check_witness(X):
+            raise ValueError(
+                "witness does not satisfy within 1/%d" % k)
+        aL, aR, aO = circ.evaluate(X)
     assert circ.check_constraints(aL, aR, aO), "compiler bug: bad witness wires"
     proof = bulletproof.prove(circ, aL, aR, aO)
     proof["equation"] = circ.canonical
