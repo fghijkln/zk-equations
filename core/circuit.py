@@ -738,10 +738,18 @@ class Circuit:
         # Precision k is MANDATORY for every equation (parsed first).
         self.precision = _parse_precision(precision)
         self.integral_spec = integral_spec
-        # Integral equations: form must be x = int(f,a,b); compute S via
-        # adaptive Simpson and fill in the constant term.
+        # Integral equations: FTC mode (bypass exact/tolerance selection).
+        # The poly is {1: (±1,0), 0: (0,0)} (placeholder); FTC uses the
+        # spec directly.
         if integral_spec is not None:
-            poly = self._process_integral(poly, integral_spec)
+            self._process_integral(poly, integral_spec)
+            self.is_complex = False
+            self.mode = "ftc"
+            spec = integral_spec
+            self._build_ftc(spec['integrand'], spec['a'], spec['b'])
+            self.canonical = ("%s;k=%d" % (
+                self._integral_canon, self.precision))
+            return
         # Normalize overall sign so that "38 = x^3+2*x+5" and
         # "x^3+2*x+5 = 38" compile to the identical circuit and
         # canonical form. For complex leading coefficient (a+bi):
@@ -786,13 +794,8 @@ class Circuit:
                 # TODO: complex tolerance circuit
                 raise ValueError("complex tolerance mode not yet implemented")
             self._build_tolerance(poly, self.precision)
-            if self.integral_spec is not None:
-                # Integral: symbolic canonical (red line: never print S).
-                self.canonical = ("%s;k=%d" % (
-                    self._integral_canon, self.precision))
-            else:
-                self.canonical = ("%s;k=%d"
-                                  % (_canon_poly_frac(poly), self.precision))
+            self.canonical = ("%s;k=%d"
+                              % (_canon_poly_frac(poly), self.precision))
 
     # ---- exact mode (unchanged semantics) ----
 
@@ -971,25 +974,71 @@ class Circuit:
 
         self._densify(cons, n)
 
+    def _build_ftc(self, f_poly, a, b):
+        """FTC circuit for x = int(f, a, b).
+
+        Witness (all private, in aL):
+          F_0, F_1, ..., F_{d+1}  (antiderivative coefficients, d = deg f)
+          v                        (the integral value)
+        Total: d+3 witness variables in aL[0..d+2].
+
+        Constraints (all linear, zero multiplication gates):
+          (j+1)*F_{j+1} = c_j  for j=0..d   (F' = f, coefficient-wise)
+          v = Σ_{j=0}^{d+1} F_j*(b^j - a^j)   (v = F(b) - F(a))
+
+        All arithmetic is exact in the field (Fractions via modular
+        inverse). The proof leaks nothing about F or v (Bulletproofs ZK).
+        The ONLY way to learn v from public artifacts is to compute
+        ∫ₐᵇ f yourself — which is the intended secrecy model.
+        """
+        d = max(f_poly.keys()) if f_poly else 0
+        # Witness count: d+3. n = next power of 2.
+        n_wit = d + 3
+        n = 1
+        while n < n_wit:
+            n *= 2
+        self.n = n
+        self._ftc_degree = d
+        # Store for evaluate/check_witness (as field elements).
+        self._ftc_a = a
+        self._ftc_b = b
+        self._ftc_f = f_poly
+
+        cons = []
+
+        def gate(which, i, coeff, acc):
+            acc[which, i] = (acc.get((which, i), 0) + coeff) % N
+
+        def _field(fr):
+            """Fraction -> field element (exact via modular inverse)."""
+            return (fr.numerator * pow(fr.denominator, N - 2, N)) % N
+
+        # Constraint set 1: (j+1)*F_{j+1} = c_j for j=0..d.
+        for j in range(d + 1):
+            c_j = f_poly.get(j, (Fraction(0), Fraction(0)))[0]
+            acc = {}
+            gate("L", j + 1, j + 1, acc)  # (j+1)*F_{j+1}
+            cons.append((acc, _field(c_j)))
+
+        # Constraint set 2: v - Σ F_j*(b^j - a^j) = 0.
+        acc = {}
+        gate("L", d + 2, 1, acc)  # v
+        for j in range(d + 2):
+            diff = b ** j - a ** j  # Fraction
+            gate("L", j, (-_field(diff)) % N, acc)
+        cons.append((acc, 0))
+
+        self._densify(cons, n)
+
     def _process_integral(self, poly, spec):
-        """Handle int(f,a,b): compute S via adaptive Simpson, return the
-        filled polynomial. Form already verified in parse_equation
-        (x = int(...) or int(...) = x); poly is {1: (±1,0), 0: (c,0)}.
+        """Handle int(f,a,b): verify form, store spec for FTC.
+        Form already verified in parse_equation (x = int(...) or
+        int(...) = x). Returns poly unchanged (FTC doesn't need S).
         Also stores self._integral_canon for the symbolic canonical.
         """
-        # Compute S via adaptive Simpson
         f_poly = spec['integrand']
         a, b = spec['a'], spec['b']
-        k = self.precision
-        S, n_used = _adaptive_simpson(f_poly, a, b, k)
-        if abs(S) > 5:
-            raise ValueError(
-                "integral value |%.3g| exceeds witness domain (|x| <= 5)" % float(S))
-        # Fill in: poly[1] is (1,0) or (-1,0); set poly[0] to ∓S.
-        c1 = poly.get(1, _c(0))
-        sign = 1 if c1[0] == 1 else -1
-        new_poly = {1: c1, 0: (-sign * S, Fraction(0))}
-        # Symbolic canonical (red line: never print the numeric S).
+        # Symbolic canonical (red line: never print any numeric value).
         # Format: x=int(<f_canon>,<a_canon>,<b_canon>);k=<k>
         f_canon_full = _canon_poly_frac(
             {e: c[0] for e, c in f_poly.items()})
@@ -1002,8 +1051,7 @@ class Circuit:
         b_canon = _fmt_bound(b)
         # Normalize sign for canonical: always "x=int(...)"
         self._integral_canon = "x=int(%s,%s,%s)" % (f_canon, a_canon, b_canon)
-        self._integral_S = S  # for prover API (I_true)
-        return new_poly
+        return poly
 
     # ---- tolerance mode ----
 
@@ -1138,11 +1186,18 @@ class Circuit:
         Exact mode (real): X is the integer witness.
         Exact mode (complex): X is a pair (A, B) = (re, im).
         Tolerance mode: X is the scaled integer witness (x = X / M_DEC).
+        FTC mode: X is a list [F_0..F_{d+1}, v] of field elements.
         """
         n = self.n
         aL = [0] * n
         aR = [0] * n
         aO = [0] * n
+        if self.mode == "ftc":
+            # FTC: witness is [F_0..F_{d+1}, v] as field elements.
+            # All constraints are linear; aR/aO are zero.
+            for j, w in enumerate(X):
+                aL[j] = w % N
+            return aL, aR, aO
         if self.mode == "exact":
             if hasattr(self, '_exact_poly_c'):
                 # Complex exact: Horner with Karatsuba 3-mult.
@@ -1228,6 +1283,27 @@ class Circuit:
 
     def check_witness(self, X):
         """True iff X satisfies the equation (within precision)."""
+        if self.mode == "ftc":
+            # FTC: X = [F_0..F_{d+1}, v] as field elements.
+            # Verify: (j+1)*F_{j+1} = c_j, and v = Σ F_j*(b^j - a^j).
+            d = self._ftc_degree
+            f_poly = self._ftc_f
+            a, b = self._ftc_a, self._ftc_b
+            def _field(fr):
+                return (fr.numerator * pow(fr.denominator, N - 2, N)) % N
+            # Check F' = f: (j+1)*F_{j+1} = c_j
+            for j in range(d + 1):
+                c_j = f_poly.get(j, (Fraction(0), Fraction(0)))[0]
+                lhs = ((j + 1) * (X[j + 1] % N)) % N
+                if lhs != _field(c_j):
+                    return False
+            # Check v = F(b) - F(a)
+            v = X[d + 2] % N
+            s = 0
+            for j in range(d + 2):
+                diff = _field(b ** j - a ** j)
+                s = (s + (X[j] % N) * diff) % N
+            return v == s
         if self.mode == "exact":
             if hasattr(self, '_exact_poly_c'):
                 # Complex exact: Horner with Karatsuba 3-mult.

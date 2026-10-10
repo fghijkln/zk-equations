@@ -360,6 +360,20 @@ expect_raises("integral x+int rejected",
 expect_raises("integral 2x=int rejected",
               lambda: api.prove_equation("2*x = int(x^2, 0, 1)", "0.6", "100"))
 
+# FTC secrecy: circuit contains no trace of the integral value.
+# (The value 1/3 = inv(3) mod N must not appear in constraints.)
+from core import circuit as _cm
+_fc = _cm.compile("x = int(x^2, 0, 1)", "1000")
+_inv3 = pow(3, _cm.N - 2, _cm.N)
+_flat = []
+for qi in range(_fc.q):
+    _flat.extend(_fc.WL[qi])
+    _flat.extend(_fc.WR[qi])
+    _flat.extend(_fc.WO[qi])
+    _flat.append(_fc.c[qi])
+check("FTC circuit leaks no value", _inv3 not in _flat and _inv3 not in _fc.c)
+check("FTC mode is ftc", _fc.mode == "ftc")
+
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))
 if FAIL:

@@ -123,15 +123,20 @@ def _check_precision(eq_str, w_frac, k):
     if not poly or all(circuit_mod._ciszero(c) for c in poly.values()):
         return 0.0
     eps = 1.0 / k
-    # Integral equations: witness must be within 1/k of S (Simpson value).
+    # Integral equations (FTC): witness must be within 1/k of the
+    # analytical integral value I_true = F(b) - F(a).
     if integral_spec is not None:
         if isinstance(w_frac, tuple):
             raise ValueError("integral witness must be a real number")
         f_poly = integral_spec['integrand']
         a, b = integral_spec['a'], integral_spec['b']
-        S, _ = circuit_mod._adaptive_simpson(f_poly, a, b, k)
-        w = float(w_frac)
-        dist = abs(w - float(S))
+        # Analytical I_true via antiderivative (exact Fraction).
+        I_true = Fraction(0)
+        for e, c in f_poly.items():
+            coeff = c[0] / (e + 1)
+            I_true += coeff * (b ** (e + 1) - a ** (e + 1))
+        w = w_frac  # Fraction
+        dist = abs(float(w - I_true))
         if dist >= eps:
             raise ValueError(
                 "witness is not within precision 1/%d=%.3g of the integral "
@@ -225,12 +230,41 @@ def prove_equation(eq_str, witness, precision):
         # TODO: complex tolerance mode
         if w_is_complex:
             raise ValueError("complex tolerance mode not yet implemented")
-        w_frac = w_pair[0]
-        X = _quantize(w_frac)
-        if not circ.check_witness(X):
-            raise ValueError(
-                "witness does not satisfy within 1/%d" % k)
-        aL, aR, aO = circ.evaluate(X)
+        if circ.mode == "ftc":
+            # FTC: witness is [F_0..F_{d+1}, v] as field elements.
+            # Compute F analytically from f; v is the EXACT I_true = F(b)-F(a)
+            # (not the user's decimal, which has quantization error).
+            # The user's v was already pre-checked: |v - I_true| < 1/k.
+            spec = circ.integral_spec
+            f_poly = spec['integrand']
+            a, b = spec['a'], spec['b']
+            d = max(f_poly.keys()) if f_poly else 0
+            # F_j = c_{j-1}/j for j>=1, F_0 = 0 (constant of integration).
+            F = [Fraction(0)] * (d + 2)
+            for j in range(1, d + 2):
+                c_jm1 = f_poly.get(j - 1, (Fraction(0), Fraction(0)))[0]
+                F[j] = c_jm1 / j
+            # Exact I_true = F(b) - F(a).
+            I_true = Fraction(0)
+            for j in range(d + 2):
+                I_true += F[j] * (b ** j - a ** j)
+            # Convert to field elements.
+            def _field(fr):
+                return (fr.numerator * pow(fr.denominator,
+                                           circuit_mod.N - 2,
+                                           circuit_mod.N)) % circuit_mod.N
+            X = [_field(F[j]) for j in range(d + 2)] + [_field(I_true)]
+            if not circ.check_witness(X):
+                raise ValueError(
+                    "witness does not satisfy the FTC constraints")
+            aL, aR, aO = circ.evaluate(X)
+        else:
+            w_frac = w_pair[0]
+            X = _quantize(w_frac)
+            if not circ.check_witness(X):
+                raise ValueError(
+                    "witness does not satisfy within 1/%d" % k)
+            aL, aR, aO = circ.evaluate(X)
     assert circ.check_constraints(aL, aR, aO), "compiler bug: bad witness wires"
     proof = bulletproof.prove(circ, aL, aR, aO)
     proof["equation"] = circ.canonical
