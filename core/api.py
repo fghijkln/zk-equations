@@ -189,13 +189,24 @@ def prove_equation(eq_str, witness, precision):
                regardless of whether the roots are infinite decimals).
                Strict definition: the witness must be within 1/k of an
                exact root, else ValueError ("refuse").
+    For ODEs, precision k is meaningless (precision is deg) and may be
+    empty; the witness is auto-computed.
     Raises ValueError if the equation is malformed, the precision is
-    missing/invalid, or the witness does not satisfy (within precision).
+    missing/invalid (non-ODE), or the witness does not satisfy (within
+    precision).
     """
-    if not str(precision).strip():
+    # ODEs: k is meaningless; allow empty (use dummy for compile).
+    _, _, _, _, ode_spec = circuit_mod.parse_polynomial(eq_str)
+    if ode_spec is None and not str(precision).strip():
         raise ValueError("precision k is required for every equation")
+    if ode_spec is not None and not str(precision).strip():
+        precision = "1"  # dummy; canonical has no k
     # Parse witness FIRST to detect complex (determines circuit type).
-    w_pair, w_is_complex = _parse_witness_complex(witness)
+    # ODEs: witness is auto-computed; allow empty.
+    if ode_spec is not None and not str(witness).strip():
+        w_pair, w_is_complex = ((Fraction(0), Fraction(0)), False)
+    else:
+        w_pair, w_is_complex = _parse_witness_complex(witness)
     circ = circuit_mod.compile(eq_str, precision, force_complex=w_is_complex)
     k = circ.precision  # int, from the user-supplied definition (1/k)
     # ODE mode: witness is computed automatically (coefficients are exact).
@@ -396,17 +407,23 @@ def ode_coefficients(eq_str):
 def verify_equation(eq_str, proof, precision):
     """Verify a proof against an equation string. Returns True/False.
 
-    precision: k (int/str), MANDATORY. The verifier must supply the
-    precision explicitly; it is NEVER taken from the proof itself.
-    (Reading k from the proof would let a malicious prover weaken the
-    requirement.) Returns False (rather than raising) on any malformed
-    proof, a canonical-equation mismatch (covers moved-term spellings
-    AND precision mismatches, since canonical includes ";k=<k>"),
-    or a precision mismatch.
-    Raises ValueError if precision is missing/invalid (caller error).
+    precision: k (int/str), MANDATORY for algebraic/integral equations.
+    For ODEs, k is meaningless (precision is deg) and may be empty.
+    The verifier must supply the precision explicitly; it is NEVER taken
+    from the proof itself. (Reading k from the proof would let a malicious
+    prover weaken the requirement.) Returns False (rather than raising)
+    on any malformed proof, a canonical-equation mismatch (covers
+    moved-term spellings AND precision mismatches, since canonical
+    includes ";k=<k>"), or a precision mismatch.
+    Raises ValueError if precision is missing/invalid (caller error,
+    except for ODEs where it's optional).
     """
-    if not str(precision).strip():
+    # ODEs: k is meaningless; allow empty.
+    _, _, _, _, ode_spec = circuit_mod.parse_polynomial(eq_str)
+    if ode_spec is None and not str(precision).strip():
         raise ValueError("precision k is required to verify")
+    if ode_spec is not None and not str(precision).strip():
+        precision = "1"  # dummy; canonical has no k
     try:
         if not isinstance(proof, dict):
             return False

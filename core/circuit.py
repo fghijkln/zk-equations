@@ -922,12 +922,12 @@ class Circuit:
                 self._integral_canon, self.precision))
             return
         # ODE equations: ode mode (bypass exact/tolerance selection).
+        # k is MEANINGLESS for ODEs (precision is deg); canonical has no k.
         if ode_spec is not None:
             self.is_complex = False
             self.mode = "ode"
             self._build_ode(ode_spec)
-            self.canonical = ("%s;k=%d" % (
-                self._ode_canon, self.precision))
+            self.canonical = self._ode_canon  # no ;k=
             return
         # Normalize overall sign so that "38 = x^3+2*x+5" and
         # "x^3+2*x+5 = 38" compile to the identical circuit and
