@@ -48,6 +48,36 @@ public class ZkBridge {
         }
     }
 
+    @JavascriptInterface
+    public String ode_coefficients(String odeBody, String deg) {
+        try {
+            PyObject r = api.callAttr("ode_coefficients", odeBody, deg);
+            return r.toString();
+        } catch (Exception e) {
+            return "{\"ok\":false,\"error\":\"" + escape(String.valueOf(e)) + "\"}";
+        }
+    }
+
+    @JavascriptInterface
+    public String prove_ode(String odeBody, String deg) {
+        try {
+            PyObject r = api.callAttr("prove_ode", odeBody, deg);
+            return r.toString();
+        } catch (Exception e) {
+            return "{\"ok\":false,\"error\":\"" + escape(String.valueOf(e)) + "\"}";
+        }
+    }
+
+    @JavascriptInterface
+    public String verify_ode(String odeBody, String deg, String proofJson) {
+        try {
+            PyObject r = api.callAttr("verify_ode", odeBody, deg, proofJson);
+            return r.toString();
+        } catch (Exception e) {
+            return "{\"ok\":false,\"error\":\"" + escape(String.valueOf(e)) + "\"}";
+        }
+    }
+
     private static String escape(String s) {
         return s.replace("\\", "\\\\")
                 .replace("\"", "\\\"")
