@@ -333,6 +333,33 @@ expect_raises("wrong complex witness refused",
 expect_raises("non-Gaussian witness refused",
               lambda: api.prove_equation("x^2 + 1 = 0", "0.5i", "1000"))
 
+# ---- integral equations: x = int(f, a, b) ----
+# integral_value helper
+iv = api.integral_value("x = int(x^2, 0, 1)")
+check("integral_value(x^2,0,1) ~ 1/3", abs(float(iv) - 1/3) < 1e-9)
+# Prove and verify
+pi = api.prove_equation("x = int(x^2, 0, 1)", iv, "1000")
+check("integral x=int(x^2,0,1) proves",
+      api.verify_equation("x = int(x^2, 0, 1)", pi, "1000"))
+# Red line: no numeric value in the equation field
+check("integral equation hides numeric value",
+      "0.333" not in pi["equation"] and pi["equation"].startswith("x=int("))
+# Wrong k does not verify
+check("integral wrong k rejected",
+      not api.verify_equation("x = int(x^2, 0, 1)", pi, "999"))
+# Reversed form
+pi2 = api.prove_equation("int(x^2, 0, 1) = x", iv, "1000")
+check("integral int=x form proves",
+      api.verify_equation("int(x^2, 0, 1) = x", pi2, "1000"))
+# Wrong witness refused
+expect_raises("integral wrong witness refused",
+              lambda: api.prove_equation("x = int(x^2, 0, 1)", "0.5", "1000"))
+# Form restriction: only x = int(...) allowed
+expect_raises("integral x+int rejected",
+              lambda: api.prove_equation("x + int(x^2, 0, 1) = 1", "0.6", "100"))
+expect_raises("integral 2x=int rejected",
+              lambda: api.prove_equation("2*x = int(x^2, 0, 1)", "0.6", "100"))
+
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))
 if FAIL:

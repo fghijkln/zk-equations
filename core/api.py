@@ -17,6 +17,8 @@ the same equation with a different k does NOT verify.
 
 from fractions import Fraction
 
+import math
+
 from . import bulletproof
 from . import circuit as circuit_mod
 from . import solve as solve_mod
@@ -117,10 +119,24 @@ def _check_precision(eq_str, w_frac, k):
     """
     # Vacuously true equation (zero polynomial): every x is a root,
     # so any witness is within precision.
-    poly, _, _ = circuit_mod.parse_polynomial(eq_str)
+    poly, _, _, integral_spec = circuit_mod.parse_polynomial(eq_str)
     if not poly or all(circuit_mod._ciszero(c) for c in poly.values()):
         return 0.0
     eps = 1.0 / k
+    # Integral equations: witness must be within 1/k of S (Simpson value).
+    if integral_spec is not None:
+        if isinstance(w_frac, tuple):
+            raise ValueError("integral witness must be a real number")
+        f_poly = integral_spec['integrand']
+        a, b = integral_spec['a'], integral_spec['b']
+        S, _ = circuit_mod._adaptive_simpson(f_poly, a, b, k)
+        w = float(w_frac)
+        dist = abs(w - float(S))
+        if dist >= eps:
+            raise ValueError(
+                "witness is not within precision 1/%d=%.3g of the integral "
+                "value (distance %.3g)" % (k, eps, dist))
+        return dist
     # Detect complex: witness is a pair, OR the polynomial has complex coeffs.
     poly_is_complex = any(isinstance(c, tuple) and c[1] != 0
                           for c in poly.values())
@@ -244,7 +260,7 @@ def solve_equation(eq_str, decimals=8):
         return roots
     # exact (integer) equations: show integral roots as plain integers
     # ("3", not "3.00000000") so they can be tapped straight into prove
-    poly, trans_used, float_seen = circuit_mod.parse_polynomial(eq)
+    poly, trans_used, float_seen, _ = circuit_mod.parse_polynomial(eq)
     def _is_int_coeff(c):
         if isinstance(c, tuple):
             return c[0].denominator == 1 and c[1].denominator == 1
@@ -258,6 +274,40 @@ def solve_equation(eq_str, decimals=8):
         else:
             out.append(("%." + str(dec) + "f") % v)
     return out
+
+
+def integral_value(eq_str, decimals=12):
+    """Get the analytical integral value for an integral equation.
+    Returns a string with up to `decimals` places (for the prover to
+    use as witness). Raises ValueError if not an integral equation.
+    
+    Uses the analytical antiderivative (exact Fraction), not Simpson.
+    """
+    poly, _, _, integral_spec = circuit_mod.parse_polynomial(eq_str)
+    if integral_spec is None:
+        raise ValueError("not an integral equation")
+    f_poly = integral_spec['integrand']
+    a, b = integral_spec['a'], integral_spec['b']
+    # Analytical antiderivative: F(x) = sum c_e/(e+1) * x^(e+1)
+    # F(b) - F(a), exact Fraction
+    F_b = Fraction(0)
+    F_a = Fraction(0)
+    for e, c in f_poly.items():
+        # c is (re, im); integrand is real
+        coeff = c[0] / (e + 1)
+        F_b += coeff * (b ** (e + 1))
+        F_a += coeff * (a ** (e + 1))
+    I_true = F_b - F_a
+    # Format to decimals
+    q = 10 ** decimals
+    # Round half away from zero
+    v = float(I_true)
+    rv = math.floor(v * q + 0.5) / q if v >= 0 else -math.floor(-v * q + 0.5) / q
+    s = "%.*f" % (decimals, rv)
+    # Strip trailing zeros but keep at least one decimal place for clarity
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s if s not in ("", "-0") else "0"
 
 
 def verify_equation(eq_str, proof, precision):

@@ -152,7 +152,7 @@ _CHEBYSHEV = {
 # ---------------- tokenizer ----------------
 
 class Tok:
-    INT, FLOAT, IDENT, X, PLUS, MINUS, STAR, POW, LP, RP, EQ = range(11)
+    INT, FLOAT, IDENT, X, PLUS, MINUS, STAR, POW, LP, RP, EQ, COMMA = range(12)
 
     def __init__(self, kind, val=None):
         self.kind = kind
@@ -209,6 +209,8 @@ def tokenize(s):
             toks.append(Tok(Tok.RP)); i += 1
         elif ch == "=":
             toks.append(Tok(Tok.EQ)); i += 1
+        elif ch == ",":
+            toks.append(Tok(Tok.COMMA)); i += 1
         else:
             raise ValueError("unexpected character %r in equation" % ch)
     return toks
@@ -225,10 +227,15 @@ def _c(re, im=0):
 
 
 def _cadd(a, b):
+    # Sentinel propagates (for int(f,a,b) placeholder).
+    if a is _INT_PH or b is _INT_PH:
+        return _INT_PH
     return (a[0] + b[0], a[1] + b[1])
 
 
 def _cneg(a):
+    if a is _INT_PH:
+        return _INT_PH
     return (-a[0], -a[1])
 
 
@@ -238,6 +245,13 @@ def _csub(a, b):
 
 def _cmul(a, b):
     """(a+bi)(c+di) = (ac-bd) + (ad+bc)i. Schoolbook 4-mult."""
+    if a is _INT_PH or b is _INT_PH:
+        # int(...) in a product: propagate sentinel; form check rejects.
+        # (0 * sentinel = 0, so 0*int(...) is just 0.)
+        zero = (Fraction(0), Fraction(0))
+        if a == zero or b == zero:
+            return zero
+        return _INT_PH
     return (a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0])
 
 
@@ -247,12 +261,66 @@ def _csq(a):
 
 
 def _ciszero(a):
+    if a is _INT_PH:
+        return False  # sentinel is never "zero" (form check handles it)
     return a[0] == 0 and a[1] == 0
 
 
 def _cisgaussian_int(a):
     """True iff both parts are integers (Gaussian integer)."""
     return a[0].denominator == 1 and a[1].denominator == 1
+
+
+# Sentinel for int(f,a,b) placeholder (so parse_equation can detect it
+# before LHS-RHS mixing). Never appears in a real polynomial.
+_INT_PH = object()
+
+
+# ---------------- adaptive Simpson (exact Fraction arithmetic) ----------------
+
+def _simpson_sum(f_poly, a, b, n):
+    """Composite Simpson's rule with n intervals (n even).
+    f_poly: {exp: (re,im)} polynomial (must be real-valued).
+    a, b: Fractions (bounds). n: even int.
+    Returns Fraction (exact).
+    """
+    # f must be real (im parts zero)
+    h = (b - a) / n
+    # Evaluate f at x_i = a + i*h for i=0..n
+    def eval_poly(x):
+        # x is Fraction; f_poly has (re,im) pairs, use re only
+        v = Fraction(0)
+        for e, c in f_poly.items():
+            v += c[0] * (x ** e)
+        return v
+    s = eval_poly(a) + eval_poly(b)
+    for i in range(1, n):
+        x_i = a + i * h
+        coeff = 4 if i % 2 == 1 else 2
+        s += coeff * eval_poly(x_i)
+    return s * h / 3
+
+
+def _adaptive_simpson(f_poly, a, b, k, max_n=1024):
+    """Adaptive Simpson via Richardson extrapolation.
+    Start n=4, double until |S_{2n} - S_n|/15 < 1/(4k).
+    Returns (S: Fraction, n: int).
+    Raises ValueError if not converged by max_n.
+    """
+    # Budget: Simpson truncation error < 1/(4k)
+    tol = Fraction(1, 4 * k)
+    n = 4
+    S_n = _simpson_sum(f_poly, a, b, n)
+    while n < max_n:
+        n2 = n * 2
+        S_2n = _simpson_sum(f_poly, a, b, n2)
+        # Richardson error estimate for Simpson: |S_{2n} - S_n|/15
+        err = abs(S_2n - S_n) / 15
+        if err < tol:
+            return S_2n, n2
+        n, S_n = n2, S_2n
+    raise ValueError(
+        "integrand too oscillatory for k=%d (n exceeded %d)" % (k, max_n))
 
 
 # ---------------- parser: AST -> polynomial {exp: (re, im)} ----------------
@@ -263,6 +331,7 @@ class Parser:
         self.pos = 0
         self.trans_used = False
         self.float_seen = False
+        self.integral_spec = None  # set if int(f,a,b) is used
 
     def peek(self):
         return self.toks[self.pos] if self.pos < len(self.toks) else None
@@ -282,6 +351,25 @@ class Parser:
         rhs = self.parse_expr()
         if self.peek() is not None:
             raise ValueError("trailing tokens after equation")
+        # Integral form restriction: if int(...) was used, the equation
+        # must be exactly "x = int(f,a,b)" or "int(f,a,b) = x".
+        # (Checked here, before LHS-RHS mixing, via the sentinel.)
+        if self.integral_spec is not None:
+            def _is_int_side(p):
+                return (set(p.keys()) == {0} and p[0] is _INT_PH)
+            def _is_x_side(p):
+                return (set(p.keys()) == {1}
+                        and p[1][0] in (1, -1) and p[1][1] == 0)
+            ok = ((_is_x_side(lhs) and _is_int_side(rhs))
+                  or (_is_int_side(lhs) and _is_x_side(rhs)))
+            if not ok:
+                raise ValueError(
+                    "integral equations must be of the form x = int(f, a, b)")
+            # Replace sentinel with {0: (0,0)} for the subtraction.
+            if _is_int_side(lhs):
+                lhs = {0: _c(0)}
+            if _is_int_side(rhs):
+                rhs = {0: _c(0)}
         return _psub(lhs, rhs)  # normalize: LHS - RHS = 0
 
     def parse_expr(self):
@@ -342,6 +430,46 @@ class Parser:
             if name == "i":
                 # imaginary unit (formal; i^2 = -1)
                 return {0: _c(0, 1)}
+            if name == "int":
+                # Definite integral: int(f, a, b).
+                # f: integrand polynomial in x; a, b: constant bounds.
+                # Returns placeholder {0: (0,0)}; Circuit computes S via
+                # adaptive Simpson and fills in the real constant.
+                if self.integral_spec is not None:
+                    raise ValueError("only one int(...) per equation")
+                if self.next().kind != Tok.LP:
+                    raise ValueError("expected '(' after 'int'")
+                f_poly = self.parse_expr()
+                if self.next().kind != Tok.COMMA:
+                    raise ValueError("expected ',' in int(f, a, b)")
+                a_poly = self.parse_expr()
+                if self.next().kind != Tok.COMMA:
+                    raise ValueError("expected ',' in int(f, a, b)")
+                b_poly = self.parse_expr()
+                if self.next().kind != Tok.RP:
+                    raise ValueError("missing ')' in int(f, a, b)")
+                # Bounds must be constants (no x); must be real.
+                def _const_frac(p, bname):
+                    if any(e != 0 for e in p.keys()):
+                        raise ValueError(
+                            "integration %s bound must be a number" % bname)
+                    c = p.get(0, _c(0))
+                    if c[1] != 0:
+                        raise ValueError(
+                            "integration bounds must be real numbers")
+                    return c[0]
+                a_frac = _const_frac(a_poly, "lower")
+                b_frac = _const_frac(b_poly, "upper")
+                # Integrand must be real-valued (im parts zero).
+                if any(c[1] != 0 for c in f_poly.values()):
+                    raise ValueError(
+                        "integrand must be real-valued (no 'i' in f)")
+                self.integral_spec = {
+                    'integrand': f_poly,
+                    'a': a_frac,
+                    'b': b_frac,
+                }
+                return {0: _INT_PH}  # sentinel; Circuit fills in S
             if name not in _APPROX:
                 raise ValueError("unknown function '%s' "
                                  "(supported: sin, cos, exp, ln)" % name)
@@ -423,10 +551,15 @@ _APPROX = {
 
 
 def parse_polynomial(eq_str):
-    """Parse 'lhs = rhs' into ({exp: Fraction} for lhs - rhs,
-    trans_used, float_seen)."""
+    """Parse 'lhs = rhs' into ({exp: (re,im)} for lhs - rhs,
+    trans_used, float_seen, integral_spec).
+
+    integral_spec is None for non-integral equations, else a dict with
+    'integrand' ({exp: (re,im)}), 'a' (Fraction), 'b' (Fraction).
+    """
     parser = Parser(tokenize(eq_str))
-    return parser.parse_equation(), parser.trans_used, parser.float_seen
+    poly = parser.parse_equation()
+    return poly, parser.trans_used, parser.float_seen, parser.integral_spec
 
 
 # ---------------- canonical form ----------------
@@ -600,10 +733,15 @@ class Circuit:
     """
 
     def __init__(self, eq_str, poly, precision, trans_used, float_seen,
-                 force_complex=False):
+                 force_complex=False, integral_spec=None):
         self.eq_str = eq_str
         # Precision k is MANDATORY for every equation (parsed first).
         self.precision = _parse_precision(precision)
+        self.integral_spec = integral_spec
+        # Integral equations: form must be x = int(f,a,b); compute S via
+        # adaptive Simpson and fill in the constant term.
+        if integral_spec is not None:
+            poly = self._process_integral(poly, integral_spec)
         # Normalize overall sign so that "38 = x^3+2*x+5" and
         # "x^3+2*x+5 = 38" compile to the identical circuit and
         # canonical form. For complex leading coefficient (a+bi):
@@ -648,8 +786,13 @@ class Circuit:
                 # TODO: complex tolerance circuit
                 raise ValueError("complex tolerance mode not yet implemented")
             self._build_tolerance(poly, self.precision)
-            self.canonical = ("%s;k=%d"
-                              % (_canon_poly_frac(poly), self.precision))
+            if self.integral_spec is not None:
+                # Integral: symbolic canonical (red line: never print S).
+                self.canonical = ("%s;k=%d" % (
+                    self._integral_canon, self.precision))
+            else:
+                self.canonical = ("%s;k=%d"
+                                  % (_canon_poly_frac(poly), self.precision))
 
     # ---- exact mode (unchanged semantics) ----
 
@@ -827,6 +970,40 @@ class Circuit:
         cons.append((acc, (-I_const) % N))  # im(P) = 0
 
         self._densify(cons, n)
+
+    def _process_integral(self, poly, spec):
+        """Handle int(f,a,b): compute S via adaptive Simpson, return the
+        filled polynomial. Form already verified in parse_equation
+        (x = int(...) or int(...) = x); poly is {1: (±1,0), 0: (c,0)}.
+        Also stores self._integral_canon for the symbolic canonical.
+        """
+        # Compute S via adaptive Simpson
+        f_poly = spec['integrand']
+        a, b = spec['a'], spec['b']
+        k = self.precision
+        S, n_used = _adaptive_simpson(f_poly, a, b, k)
+        if abs(S) > 5:
+            raise ValueError(
+                "integral value |%.3g| exceeds witness domain (|x| <= 5)" % float(S))
+        # Fill in: poly[1] is (1,0) or (-1,0); set poly[0] to ∓S.
+        c1 = poly.get(1, _c(0))
+        sign = 1 if c1[0] == 1 else -1
+        new_poly = {1: c1, 0: (-sign * S, Fraction(0))}
+        # Symbolic canonical (red line: never print the numeric S).
+        # Format: x=int(<f_canon>,<a_canon>,<b_canon>);k=<k>
+        f_canon_full = _canon_poly_frac(
+            {e: c[0] for e, c in f_poly.items()})
+        # Strip the trailing "=0" (we want just the polynomial)
+        f_canon = f_canon_full[:-2] if f_canon_full.endswith("=0") else f_canon_full
+        def _fmt_bound(fr):
+            return (str(fr.numerator) if fr.denominator == 1
+                    else "%d/%d" % (fr.numerator, fr.denominator))
+        a_canon = _fmt_bound(a)
+        b_canon = _fmt_bound(b)
+        # Normalize sign for canonical: always "x=int(...)"
+        self._integral_canon = "x=int(%s,%s,%s)" % (f_canon, a_canon, b_canon)
+        self._integral_S = S  # for prover API (I_true)
+        return new_poly
 
     # ---- tolerance mode ----
 
@@ -1121,6 +1298,6 @@ def compile(eq_str, precision, force_complex=False):
     Raises ValueError on syntax errors, unsatisfiable equations, or a
     missing/invalid precision.
     """
-    poly, trans_used, float_seen = parse_polynomial(eq_str)
+    poly, trans_used, float_seen, integral_spec = parse_polynomial(eq_str)
     return Circuit(eq_str, poly, precision, trans_used, float_seen,
-                   force_complex=force_complex)
+                   force_complex=force_complex, integral_spec=integral_spec)
