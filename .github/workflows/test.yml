@@ -1,0 +1,63 @@
+name: ZK Core Tests
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [exp/complex-v0.4.3, main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run ZK core test suite
+        run: |
+          cd $GITHUB_WORKSPACE
+          timeout 600 python3 -m tests.test_zk 2>&1 | tail -5
+
+      - name: Check for test failures
+        run: |
+          cd $GITHUB_WORKSPACE
+          OUTPUT=$(timeout 600 python3 -m tests.test_zk 2>&1)
+          echo "$OUTPUT" | tail -3
+          if echo "$OUTPUT" | grep -q "^FAIL "; then
+            echo "TESTS FAILED"
+            exit 1
+          fi
+          if ! echo "$OUTPUT" | grep -q "passed "; then
+            echo "NO TEST SUMMARY FOUND"
+            exit 1
+          fi
+          echo "ALL TESTS PASSED"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install linters
+        run: pip install pyflakes bandit
+
+      - name: Pyflakes (syntax/unused checks)
+        run: |
+          cd $GITHUB_WORKSPACE
+          python3 -m pyflakes core/*.py tests/*.py 2>&1 | head -30 || true
+
+      - name: Bandit (security scan)
+        run: |
+          cd $GITHUB_WORKSPACE
+          python3 -m bandit -r core/ -f txt 2>&1 | head -50 || true
