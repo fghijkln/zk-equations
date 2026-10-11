@@ -408,6 +408,30 @@ check("ode 2nd order proves",
 check("ode 2nd order coarse",
       api.verify_equation("ode(y'' + y = 0, y(0) = 0, y'(0) = 1, deg = 4)", po2, ""))
 
+# ---- Chebyshev tau: cheb(<diffeq>, <ics>, deg=<N>) on [-1, 1] ----
+# y' = y, y(0)=1, deg=7: coefficients approximate e^x
+cc = api.cheb_coefficients("cheb(y' = y, y(0) = 1, deg = 7)")
+# y(1) = Σ c_n should be ≈ e
+y1 = sum(float(x) for x in cc)
+check("cheb y'=y accuracy", abs(y1 - 2.718281828459045) < 2e-6)
+pc = api.prove_equation("cheb(y' = y, y(0) = 1, deg = 7)", "", "")
+check("cheb y'=y proves",
+      api.verify_equation("cheb(y' = y, y(0) = 1, deg = 7)", pc, ""))
+check("cheb canonical no k",
+      pc["equation"].startswith("cheb(") and ";k=" not in pc["equation"])
+check("cheb coarse deg verifies",
+      api.verify_equation("cheb(y' = y, y(0) = 1, deg = 5)", pc, ""))
+check("cheb finer deg rejected",
+      not api.verify_equation("cheb(y' = y, y(0) = 1, deg = 8)", pc, ""))
+# Second-order: y'' + y = 0, y(0)=0, y'(0)=1 -> sin(x) on [-1,1]
+cc2 = api.cheb_coefficients("cheb(y'' + y = 0, y(0) = 0, y'(0) = 1, deg = 8)")
+# sin(1) ≈ 0.8414709848; y(1) = Σ c_n
+y1_sin = sum(float(x) for x in cc2)
+check("cheb y''+y=0 accuracy", abs(y1_sin - 0.8414709848078965) < 1e-6)
+pc2 = api.prove_equation("cheb(y'' + y = 0, y(0) = 0, y'(0) = 1, deg = 8)", "", "")
+check("cheb 2nd order proves",
+      api.verify_equation("cheb(y'' + y = 0, y(0) = 0, y'(0) = 1, deg = 8)", pc2, ""))
+
 print()
 print("passed %d/%d" % (len(PASS), len(PASS) + len(FAIL)))
 if FAIL:

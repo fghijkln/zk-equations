@@ -337,6 +337,7 @@ class Parser:
         self.float_seen = False
         self.integral_spec = None  # set if int(f,a,b) is used
         self.ode_spec = None  # set if ode(...) is used
+        self.cheb_spec = None  # set if cheb(...) is used
 
     def peek(self):
         return self.toks[self.pos] if self.pos < len(self.toks) else None
@@ -354,6 +355,11 @@ class Parser:
         if (self.peek() is not None and self.peek().kind == Tok.IDENT
                 and self.peek().val == "ode"):
             return self.parse_ode()
+        # Chebyshev top-level form: cheb(<diffeq>, <ic>, deg = <d>)
+        # Check for 'cheb' (before regular equation parsing).
+        if (self.peek() is not None and self.peek().kind == Tok.IDENT
+                and self.peek().val == "cheb"):
+            return self.parse_cheb()
         lhs = self.parse_expr()
         t = self.next()
         if t.kind != Tok.EQ:
@@ -480,6 +486,111 @@ class Parser:
             'diffeq': diffeq,  # {(ex, ord): coeff}, ord=-1 for pure x
             'order': order,
             'ics': ics,  # {ord: Fraction}
+            'deg': deg,
+        }
+        return {0: _c(0)}  # dummy; not used
+
+    def parse_cheb(self):
+        """Parse cheb(<diffeq>, <ic1>, ..., deg = <d>).
+        Chebyshev tau method on [-1, 1].
+        <diffeq> is a general equation <expr> = <expr> where expr is a
+        polynomial in x and y^(ord) (y, y', y'', ...), linear in y.
+        <ic> is y^(ord)(x0) = <val> where x0 ∈ {-1, 0, 1} (rational T_k).
+        Returns a placeholder poly; stores spec in self.cheb_spec.
+        """
+        if self.cheb_spec is not None:
+            raise ValueError("only one cheb(...) per equation")
+        self.next()  # consume 'cheb'
+        if self.next().kind != Tok.LP:
+            raise ValueError("expected '(' after 'cheb'")
+        # Differential equation: <expr> = <expr>.
+        lhs = self._parse_bivariate()
+        if self.next().kind != Tok.EQ:
+            raise ValueError("differential equation must contain '='")
+        rhs = self._parse_bivariate()
+        # diffeq = lhs - rhs as {(ex, ord): coeff}
+        diffeq = {}
+        for k, c in lhs.items():
+            diffeq[k] = diffeq.get(k, Fraction(0)) + c
+        for k, c in rhs.items():
+            diffeq[k] = diffeq.get(k, Fraction(0)) - c
+        diffeq = {k: c for k, c in diffeq.items() if c != 0}
+        if self.next().kind != Tok.COMMA:
+            raise ValueError("expected ',' after differential equation")
+        # Side conditions: y^(ord)(x0) = <val>, x0 ∈ {-1, 0, 1}.
+        # Parse until we see 'deg'.
+        ics = {}  # (ord, x0) -> Fraction
+        while True:
+            t = self.peek()
+            if t.kind == Tok.IDENT and t.val == "deg":
+                break
+            # y^(ord)(x0) = <val>
+            if self.next().kind != Tok.Y:
+                raise ValueError("expected y^(ord)(x0) = <value>")
+            ord_ = 0
+            while self.peek() and self.peek().kind == Tok.PRIME:
+                self.next()
+                ord_ += 1
+            if self.next().kind != Tok.LP:
+                raise ValueError("expected '(' after y")
+            # x0: -1, 0, or 1
+            neg = False
+            tx = self.next()
+            if tx.kind == Tok.MINUS:
+                neg = True
+                tx = self.next()
+            if tx.kind != Tok.INT or tx.val not in (0, 1):
+                raise ValueError("Chebyshev IC point must be -1, 0, or 1")
+            x0 = -tx.val if neg else tx.val
+            if x0 not in (-1, 0, 1):
+                raise ValueError("Chebyshev IC point must be -1, 0, or 1")
+            if self.next().kind != Tok.RP:
+                raise ValueError("expected ')' after y(x0")
+            if self.next().kind != Tok.EQ:
+                raise ValueError("expected '=' after y(x0)")
+            neg = False
+            tv = self.next()
+            if tv.kind == Tok.MINUS:
+                neg = True
+                tv = self.next()
+            if tv.kind == Tok.INT:
+                v = Fraction(-tv.val if neg else tv.val)
+            elif tv.kind == Tok.FLOAT:
+                v = -tv.val if neg else tv.val
+            else:
+                raise ValueError("initial value must be a number")
+            key = (ord_, x0)
+            if key in ics:
+                raise ValueError("duplicate condition for y^(%d)(%d)" % (ord_, x0))
+            ics[key] = v
+            if self.next().kind != Tok.COMMA:
+                raise ValueError("expected ',' after side condition")
+        # deg = <d>
+        self.next()  # consume 'deg'
+        if self.next().kind != Tok.EQ:
+            raise ValueError("expected '=' after deg")
+        tn = self.next()
+        if tn.kind != Tok.INT or tn.val <= 0:
+            raise ValueError("deg must be a positive integer")
+        deg = tn.val
+        if self.next().kind != Tok.RP:
+            raise ValueError("expected ')' at end of cheb(...)")
+        # Determine ODE order (max ord with y factor).
+        order = 0
+        for (ex, ord_) in diffeq.keys():
+            if ord_ >= 0 and ord_ > order:
+                order = ord_
+        if order == 0:
+            raise ValueError("not a differential equation (no y' found)")
+        # Need at least `order` side conditions.
+        if len(ics) < order:
+            raise ValueError(
+                "Chebyshev tau needs %d side conditions, got %d" % (order, len(ics)))
+        # Store spec; return dummy poly (Circuit uses spec directly).
+        self.cheb_spec = {
+            'diffeq': diffeq,  # {(ex, ord): coeff}, ord=-1 for pure x
+            'order': order,
+            'ics': ics,  # {(ord, x0): Fraction}
             'deg': deg,
         }
         return {0: _c(0)}  # dummy; not used
@@ -750,18 +861,21 @@ _APPROX = {
 
 def parse_polynomial(eq_str):
     """Parse 'lhs = rhs' into ({exp: (re,im)} for lhs - rhs,
-    trans_used, float_seen, integral_spec, ode_spec).
+    trans_used, float_seen, integral_spec, ode_spec, cheb_spec).
 
     integral_spec is None for non-integral equations, else a dict with
     'integrand' ({exp: (re,im)}), 'a' (Fraction), 'b' (Fraction).
     ode_spec is None for non-ODE equations, else a dict with
-    'a_poly' ({exp: Fraction}), 'b_poly' ({exp: Fraction}),
-    'ic_val' (Fraction), 'deg' (int).
+    'diffeq' ({(ex,ord): Fraction}), 'order' (int), 'ics' ({ord: Fraction}),
+    'deg' (int).
+    cheb_spec is None for non-Chebyshev equations, else a dict with
+    'diffeq' ({(ex,ord): Fraction}), 'order' (int),
+    'ics' ({(ord,x0): Fraction}), 'deg' (int).
     """
     parser = Parser(tokenize(eq_str))
     poly = parser.parse_equation()
     return (poly, parser.trans_used, parser.float_seen,
-            parser.integral_spec, parser.ode_spec)
+            parser.integral_spec, parser.ode_spec, parser.cheb_spec)
 
 
 # ---------------- canonical form ----------------
@@ -935,12 +1049,14 @@ class Circuit:
     """
 
     def __init__(self, eq_str, poly, precision, trans_used, float_seen,
-                 force_complex=False, integral_spec=None, ode_spec=None):
+                 force_complex=False, integral_spec=None, ode_spec=None,
+                 cheb_spec=None):
         self.eq_str = eq_str
         # Precision k is MANDATORY for every equation (parsed first).
         self.precision = _parse_precision(precision)
         self.integral_spec = integral_spec
         self.ode_spec = ode_spec
+        self.cheb_spec = cheb_spec
         # Integral equations: FTC mode (bypass exact/tolerance selection).
         # The poly is {1: (±1,0), 0: (0,0)} (placeholder); FTC uses the
         # spec directly.
@@ -960,6 +1076,14 @@ class Circuit:
             self.mode = "ode"
             self._build_ode(ode_spec)
             self.canonical = self._ode_canon  # no ;k=
+            return
+        # Chebyshev equations: cheb mode (tau method on [-1, 1]).
+        # k is MEANINGLESS (precision is deg); canonical has no k.
+        if cheb_spec is not None:
+            self.is_complex = False
+            self.mode = "cheb"
+            self._build_cheb(cheb_spec)
+            self.canonical = self._cheb_canon  # no ;k=
             return
         # Normalize overall sign so that "38 = x^3+2*x+5" and
         # "x^3+2*x+5 = 38" compile to the identical circuit and
@@ -1369,6 +1493,238 @@ class Circuit:
         ics_str = ",".join(ics_parts)
         self._ode_canon = "ode(%s=0,%s,deg=%d)" % (diffeq_str, ics_str, d)
 
+    def _build_cheb(self, spec):
+        """Chebyshev tau method on [-1, 1].
+
+        Spec: diffeq {(ex, ord): coeff} (ord=-1 for pure x, ord>=0 for
+        y^(ord)), order (max derivative), ics {(ord,x0): val} with
+        x0 ∈ {-1, 0, 1}, deg N.
+
+        Witness (private, in aL): c_0, ..., c_N (N+1 Chebyshev coeffs).
+        y(x) = Σ_{n=0}^{N} c_n T_n(x).
+
+        Differentiation (linear): if y = Σ a_n T_n then y' = Σ b_n T_n with
+          b_N = 0, b_{N-1} = 2N·a_N,
+          c̄_n·b_n = b_{n+2} + 2(n+1)·a_{n+1} (c̄_0=2, c̄_n=1 for n≥1).
+
+        Product: T_m·T_n = (T_{|m-n|} + T_{m+n})/2 (linear in coeffs).
+
+        x^ex expressed in T basis (rational coefficients).
+
+        Tau: residual R(x) = Σ r_k T_k; set r_k = 0 for k = 0..N-m
+        (m = ODE order). Plus m side conditions from ics.
+
+        All arithmetic exact (Fractions). Zero multiplication gates.
+        """
+        diffeq = spec['diffeq']
+        order = spec['order']
+        ics = spec['ics']
+        deg = spec['deg']
+        # Witness count: deg+1. n = next power of 2.
+        n_wit = deg + 1
+        n = 1
+        while n < n_wit:
+            n *= 2
+        self.n = n
+        self._cheb_degree = deg
+        self._cheb_diffeq = diffeq
+        self._cheb_order = order
+        self._cheb_ics = ics
+
+        # --- Helper: Chebyshev differentiation matrix (Fractions) ---
+        # D maps [a_0..a_N] -> [b_0..b_N] where y'=Σ b_n T_n.
+        def cheb_diff_mat(Nc):
+            D = [[Fraction(0)] * (Nc + 1) for _ in range(Nc + 1)]
+            # b_N = 0 (row deg stays zero)
+            # b_{deg-1} = 2N * a_N
+            if Nc >= 1:
+                D[Nc - 1][Nc] = Fraction(2 * Nc)
+            # c̄_n * b_n = b_{n+2} + 2(n+1) * a_{n+1}
+            # So b_n = (b_{n+2} + 2(n+1)*a_{n+1}) / c̄_n
+            # We build rows from n = deg-2 down to 0.
+            # b_n depends on b_{n+2} (already computed if going down)
+            # and a_{n+1}.
+            for nn in range(Nc - 2, -1, -1):
+                cbar = Fraction(2) if nn == 0 else Fraction(1)
+                # b_n = b_{n+2}/c̄_n + 2(n+1)/c̄_n * a_{n+1}
+                # b_{n+2} is row nn+2 of D (linear in a)
+                for col in range(Nc + 1):
+                    D[nn][col] += D[nn + 2][col] / cbar
+                D[nn][nn + 1] += Fraction(2 * (nn + 1)) / cbar
+            return D
+
+        D1 = cheb_diff_mat(deg)
+        # D^ord for ord up to `order`
+        Dpows = [[[Fraction(1) if i == j else Fraction(0)
+                   for j in range(deg + 1)] for i in range(deg + 1)]]
+        for _ in range(order):
+            prev = Dpows[-1]
+            # Dpows[-1] * D1
+            nxt = [[Fraction(0)] * (deg + 1) for _ in range(deg + 1)]
+            for i in range(deg + 1):
+                for k in range(deg + 1):
+                    if prev[i][k] != 0:
+                        for j in range(deg + 1):
+                            if D1[k][j] != 0:
+                                nxt[i][j] += prev[i][k] * D1[k][j]
+            Dpows.append(nxt)
+
+        # --- Helper: x^ex in Chebyshev basis ---
+        # Returns list px[0..ex] with x^ex = Σ px[j] T_j.
+        def x_pow_cheb(ex):
+            # x^0 = T_0
+            if ex == 0:
+                return [Fraction(1)]
+            # Build up: x^{n+1} = x * x^n = T_1 * Σ p_k T_k
+            # T_1 * T_k = (T_{|1-k|} + T_{1+k})/2
+            p = [Fraction(1)]  # x^0
+            for _ in range(ex):
+                # Multiply by x (T_1)
+                q = [Fraction(0)] * (len(p) + 1)
+                for k, pk in enumerate(p):
+                    if pk == 0:
+                        continue
+                    # T_1 * T_k = (T_{|1-k|} + T_{k+1})/2
+                    q[abs(1 - k)] += pk / 2
+                    q[k + 1] += pk / 2
+                p = q
+            return p
+
+        # Precompute x^ex for all ex in diffeq
+        x_pow_cache = {}
+        for (ex, ord_) in diffeq.keys():
+            if ex not in x_pow_cache:
+                x_pow_cache[ex] = x_pow_cheb(ex)
+
+        cons = []
+
+        def gate(which, i, coeff, acc):
+            acc[which, i] = (acc.get((which, i), 0) + coeff) % N
+
+        def _field(fr):
+            return (fr.numerator * pow(fr.denominator, N - 2, N)) % N
+
+        # --- Residual coefficients r_k for k = 0..deg-order ---
+        # R(x) = Σ_{(ex,ord),coeff} coeff * x^ex * y^(ord) + pure x terms
+        # y^(ord) = Σ_n d_n T_n where d = D^ord · c
+        # x^ex = Σ_j px_j T_j
+        # Product: Σ_{j,n} px_j d_n (T_{|j-n|} + T_{j+n})/2
+        for k in range(deg - order + 1):
+            acc = {}
+            const = Fraction(0)
+            for (ex, ord_), coeff in diffeq.items():
+                if ord_ == -1:
+                    # Pure x term: coeff * x^ex
+                    px = x_pow_cache[ex]
+                    if k < len(px):
+                        const += coeff * px[k]
+                else:
+                    # coeff * x^ex * y^(ord)
+                    px = x_pow_cache[ex]
+                    Dp = Dpows[ord_]  # d_n = Σ_m Dp[n][m] c_m
+                    # Product coefficient for T_k:
+                    # Σ_{j,n} px_j * d_n * [contribution to T_k]
+                    # T_j * T_n contributes to T_k if k=|j-n| or k=j+n
+                    for j, px_j in enumerate(px):
+                        if px_j == 0:
+                            continue
+                        for nn in range(deg + 1):
+                            # d_n = Σ_m Dp[nn][m] c_m
+                            # Contribution to r_k:
+                            # if k == |j-nn|: px_j * d_n / 2
+                            # if k == j+nn: px_j * d_n / 2
+                            # (if |j-nn| == j+nn, i.e., j=0 or nn=0, don't double)
+                            contrib = Fraction(0)
+                            if abs(j - nn) == k:
+                                contrib += px_j / 2
+                            if j + nn == k:
+                                contrib += px_j / 2
+                            if contrib != 0:
+                                # r_k += coeff * contrib * d_n
+                                # d_n = Σ_m Dp[nn][m] c_m
+                                for m in range(deg + 1):
+                                    if Dp[nn][m] != 0:
+                                        gate("L", m,
+                                             (_field(coeff * contrib * Dp[nn][m])) % N,
+                                             acc)
+            cons.append((acc, _field(-const) % N))
+
+        # --- Side conditions ---
+        # For each (ord, x0, v): Σ_n d_n T_n(x0) = v, d = D^ord · c
+        # T_n(-1) = (-1)^n, T_n(0) = [1,0,-1,0,...], T_n(1) = 1
+        def T_n_x0(nn, x0):
+            if x0 == 1:
+                return Fraction(1)
+            if x0 == -1:
+                return Fraction(-1) ** nn
+            if x0 == 0:
+                r = nn % 4
+                if r == 0:
+                    return Fraction(1)
+                if r == 1:
+                    return Fraction(0)
+                if r == 2:
+                    return Fraction(-1)
+                return Fraction(0)
+            raise ValueError("x0 must be -1, 0, or 1")
+
+        for (ord_, x0), v in sorted(ics.items()):
+            acc = {}
+            Dp = Dpows[ord_]
+            for nn in range(deg + 1):
+                tval = T_n_x0(nn, x0)
+                if tval == 0:
+                    continue
+                for m in range(deg + 1):
+                    if Dp[nn][m] != 0:
+                        gate("L", m, (_field(tval * Dp[nn][m])) % N, acc)
+            cons.append((acc, _field(v)))
+
+        self._densify(cons, n)
+        # Symbolic canonical (no numeric values in equation part).
+        # Format: cheb(<diffeq>=0,<ics>,deg=<deg>)
+        def _term_str(ex, ord_, coeff):
+            cs = (str(coeff.numerator) if coeff.denominator == 1
+                  else "%d/%d" % (coeff.numerator, coeff.denominator))
+            parts = []
+            if cs not in ("1", "-1"):
+                parts.append(cs)
+            elif cs == "-1":
+                parts.append("-")
+            if ex == 1:
+                parts.append("x")
+            elif ex > 1:
+                parts.append("x^%d" % ex)
+            if ord_ == -1:
+                pass
+            elif ord_ == 0:
+                parts.append("y")
+            elif ord_ == 1:
+                parts.append("y'")
+            else:
+                parts.append("y" + "'" * ord_)
+            s = "*".join(parts)
+            if s == "" or s == "-":
+                s = cs
+            return s
+        terms = []
+        for (ex, ord_) in sorted(diffeq.keys()):
+            terms.append(_term_str(ex, ord_, diffeq[(ex, ord_)]))
+        diffeq_str = "+".join(terms).replace("+-", "-")
+        ics_parts = []
+        for (ord_, x0) in sorted(ics.keys()):
+            v = ics[(ord_, x0)]
+            vs = (str(v.numerator) if v.denominator == 1
+                  else "%d/%d" % (v.numerator, v.denominator))
+            yname = "y" + "'" * ord_ if ord_ > 0 else "y"
+            ics_parts.append("%s(%d)=%s" % (yname, x0, vs))
+        ics_str = ",".join(ics_parts)
+        self._cheb_canon = "cheb(%s=0,%s,deg=%d)" % (diffeq_str, ics_str, deg)
+        self._cheb_spec_for_proof = spec
+        # Store linear constraints for check_witness
+        self._cheb_cons = [({i: c for (w, i), c in acc.items() if w == "L"}, rhs)
+                           for acc, rhs in cons]
+
     def _process_integral(self, poly, spec):
         """Handle int(f,a,b): verify form, store spec for FTC.
         Form already verified in parse_equation (x = int(...) or
@@ -1543,6 +1899,12 @@ class Circuit:
             for j, w in enumerate(X):
                 aL[j] = w % N
             return aL, aR, aO
+        if self.mode == "cheb":
+            # Chebyshev: witness is [c_0..c_N] as field elements.
+            # All constraints are linear; aR/aO are zero.
+            for j, w in enumerate(X):
+                aL[j] = w % N
+            return aL, aR, aO
         if self.mode == "exact":
             if hasattr(self, '_exact_poly_c'):
                 # Complex exact: Horner with Karatsuba 3-mult.
@@ -1664,6 +2026,17 @@ class Circuit:
                 if (fact[j] % N) * (X[j] % N) % N != _field(ics[j]):
                     return False
             return True
+        if self.mode == "cheb":
+            # Chebyshev: X = [c_0..c_N] as field elements.
+            # Verify linear constraints directly.
+            for coeff_dict, rhs in self._cheb_cons:
+                lhs = 0
+                for i, coeff in coeff_dict.items():
+                    if i < len(X):
+                        lhs = (lhs + coeff * (X[i] % N)) % N
+                if lhs != rhs % N:
+                    return False
+            return True
         if self.mode == "ftc":
             # FTC: X = [F_0..F_{d+1}, v] as field elements.
             # Verify: (j+1)*F_{j+1} = c_j, and v = Σ F_j*(b^j - a^j).
@@ -1755,7 +2128,7 @@ def compile(eq_str, precision, force_complex=False):
     Raises ValueError on syntax errors, unsatisfiable equations, or a
     missing/invalid precision.
     """
-    poly, trans_used, float_seen, integral_spec, ode_spec = parse_polynomial(eq_str)
+    poly, trans_used, float_seen, integral_spec, ode_spec, cheb_spec = parse_polynomial(eq_str)
     return Circuit(eq_str, poly, precision, trans_used, float_seen,
                    force_complex=force_complex, integral_spec=integral_spec,
-                   ode_spec=ode_spec)
+                   ode_spec=ode_spec, cheb_spec=cheb_spec)

@@ -119,10 +119,10 @@ def _check_precision(eq_str, w_frac, k):
     """
     # Vacuously true equation (zero polynomial): every x is a root,
     # so any witness is within precision.
-    poly, _, _, integral_spec, ode_spec = circuit_mod.parse_polynomial(eq_str)
-    # ODE equations: coefficients are exact (computed, not provided).
+    poly, _, _, integral_spec, ode_spec, cheb_spec = circuit_mod.parse_polynomial(eq_str)
+    # ODE/Chebyshev equations: coefficients are exact (computed, not provided).
     # No precision check needed.
-    if ode_spec is not None:
+    if ode_spec is not None or cheb_spec is not None:
         return 0.0
     if not poly or all(circuit_mod._ciszero(c) for c in poly.values()):
         return 0.0
@@ -195,15 +195,16 @@ def prove_equation(eq_str, witness, precision):
     missing/invalid (non-ODE), or the witness does not satisfy (within
     precision).
     """
-    # ODEs: k is meaningless; allow empty (use dummy for compile).
-    _, _, _, _, ode_spec = circuit_mod.parse_polynomial(eq_str)
-    if ode_spec is None and not str(precision).strip():
+    # ODEs/Chebyshev: k is meaningless; allow empty (use dummy for compile).
+    _, _, _, _, ode_spec, cheb_spec = circuit_mod.parse_polynomial(eq_str)
+    is_func_eq = ode_spec is not None or cheb_spec is not None
+    if not is_func_eq and not str(precision).strip():
         raise ValueError("precision k is required for every equation")
-    if ode_spec is not None and not str(precision).strip():
+    if is_func_eq and not str(precision).strip():
         precision = "1"  # dummy; canonical has no k
     # Parse witness FIRST to detect complex (determines circuit type).
-    # ODEs: witness is auto-computed; allow empty.
-    if ode_spec is not None and not str(witness).strip():
+    # ODEs/Chebyshev: witness is auto-computed; allow empty.
+    if is_func_eq and not str(witness).strip():
         w_pair, w_is_complex = ((Fraction(0), Fraction(0)), False)
     else:
         w_pair, w_is_complex = _parse_witness_complex(witness)
@@ -233,6 +234,32 @@ def prove_equation(eq_str, witness, precision):
                        for (ex, ord_), coeff in _spec['diffeq'].items()],
             'order': _spec['order'],
             'ics': [(ord_, str(v)) for ord_, v in _spec['ics'].items()],
+            'deg': _spec['deg'],
+        }
+        return proof
+    # Chebyshev mode: witness is computed automatically (tau coefficients).
+    if circ.mode == "cheb":
+        coeffs = cheb_coefficients(eq_str)
+        def _field(fr):
+            return (fr.numerator * pow(fr.denominator,
+                                       circuit_mod.N - 2,
+                                       circuit_mod.N)) % circuit_mod.N
+        X = [_field(c) for c in coeffs]
+        if not circ.check_witness(X):
+            raise ValueError("Chebyshev coefficients do not satisfy constraints")
+        aL, aR, aO = circ.evaluate(X)
+        assert circ.check_constraints(aL, aR, aO), "compiler bug: bad cheb wires"
+        proof = bulletproof.prove(circ, aL, aR, aO)
+        proof["equation"] = circ.canonical
+        proof["precision"] = k
+        # Store cheb spec for coarse verification.
+        _spec = circ._cheb_spec_for_proof
+        proof["cheb_spec"] = {
+            'diffeq': [((ex, ord_), str(coeff))
+                       for (ex, ord_), coeff in _spec['diffeq'].items()],
+            'order': _spec['order'],
+            'ics': [((ord_, x0), str(v))
+                    for (ord_, x0), v in _spec['ics'].items()],
             'deg': _spec['deg'],
         }
         return proof
@@ -336,7 +363,7 @@ def solve_equation(eq_str, decimals=8):
         return roots
     # exact (integer) equations: show integral roots as plain integers
     # ("3", not "3.00000000") so they can be tapped straight into prove
-    poly, trans_used, float_seen, _, _ = circuit_mod.parse_polynomial(eq)
+    poly, trans_used, float_seen, _, _, _ = circuit_mod.parse_polynomial(eq)
     def _is_int_coeff(c):
         if isinstance(c, tuple):
             return c[0].denominator == 1 and c[1].denominator == 1
@@ -359,7 +386,7 @@ def integral_value(eq_str, decimals=12):
     
     Uses the analytical antiderivative (exact Fraction), not Simpson.
     """
-    poly, _, _, integral_spec, _ = circuit_mod.parse_polynomial(eq_str)
+    poly, _, _, integral_spec, _, _ = circuit_mod.parse_polynomial(eq_str)
     if integral_spec is None:
         raise ValueError("not an integral equation")
     f_poly = integral_spec['integrand']
@@ -394,7 +421,7 @@ def ode_coefficients(eq_str):
     Solves the linear system from residual coefficients (k=0..d-order)
     and initial conditions. Exact Fraction arithmetic.
     """
-    _, _, _, _, ode_spec = circuit_mod.parse_polynomial(eq_str)
+    _, _, _, _, ode_spec, _ = circuit_mod.parse_polynomial(eq_str)
     if ode_spec is None:
         raise ValueError("not an ODE equation")
     diffeq = ode_spec['diffeq']
@@ -461,6 +488,152 @@ def ode_coefficients(eq_str):
     return c
 
 
+def cheb_coefficients(eq_str):
+    """Solve a linear ODE for its Chebyshev coefficients (tau method).
+    Returns a list of Fractions [c_0, ..., c_N] where
+    y(x) = Σ_{n=0}^{N} c_n T_n(x) on [-1, 1].
+    Raises ValueError if not a Chebyshev equation.
+
+    Solves the linear system from tau conditions (residual coefficients
+    r_k = 0 for k = 0..N-order) and side conditions. Exact Fractions.
+    """
+    _, _, _, _, _, cheb_spec = circuit_mod.parse_polynomial(eq_str)
+    if cheb_spec is None:
+        raise ValueError("not a Chebyshev equation")
+    diffeq = cheb_spec['diffeq']
+    order = cheb_spec['order']
+    ics = cheb_spec['ics']
+    N = cheb_spec['deg']
+
+    # Chebyshev differentiation matrices (Fractions)
+    def cheb_diff_mat(N):
+        D = [[Fraction(0)] * (N + 1) for _ in range(N + 1)]
+        if N >= 1:
+            D[N - 1][N] = Fraction(2 * N)
+        for nn in range(N - 2, -1, -1):
+            cbar = Fraction(2) if nn == 0 else Fraction(1)
+            for col in range(N + 1):
+                D[nn][col] += D[nn + 2][col] / cbar
+            D[nn][nn + 1] += Fraction(2 * (nn + 1)) / cbar
+        return D
+
+    D1 = cheb_diff_mat(N)
+    Dpows = [[[Fraction(1) if i == j else Fraction(0)
+               for j in range(N + 1)] for i in range(N + 1)]]
+    for _ in range(order):
+        prev = Dpows[-1]
+        nxt = [[Fraction(0)] * (N + 1) for _ in range(N + 1)]
+        for i in range(N + 1):
+            for k in range(N + 1):
+                if prev[i][k] != 0:
+                    for j in range(N + 1):
+                        if D1[k][j] != 0:
+                            nxt[i][j] += prev[i][k] * D1[k][j]
+        Dpows.append(nxt)
+
+    # x^ex in Chebyshev basis
+    def x_pow_cheb(ex):
+        if ex == 0:
+            return [Fraction(1)]
+        p = [Fraction(1)]
+        for _ in range(ex):
+            q = [Fraction(0)] * (len(p) + 1)
+            for k, pk in enumerate(p):
+                if pk == 0:
+                    continue
+                q[abs(1 - k)] += pk / 2
+                q[k + 1] += pk / 2
+            p = q
+        return p
+
+    x_pow_cache = {}
+    for (ex, ord_) in diffeq.keys():
+        if ex not in x_pow_cache:
+            x_pow_cache[ex] = x_pow_cheb(ex)
+
+    def T_n_x0(nn, x0):
+        if x0 == 1:
+            return Fraction(1)
+        if x0 == -1:
+            return Fraction(-1) ** nn
+        if x0 == 0:
+            r = nn % 4
+            return {0: Fraction(1), 1: Fraction(0),
+                    2: Fraction(-1), 3: Fraction(0)}[r]
+        raise ValueError("x0 must be -1, 0, or 1")
+
+    # Build linear system: (N+1) x (N+1)
+    n = N + 1
+    M = [[Fraction(0)] * n for _ in range(n)]
+    rhs = [Fraction(0)] * n
+
+    # Tau rows: r_k = 0 for k = 0..N-order
+    for k in range(N - order + 1):
+        for (ex, ord_), coeff in diffeq.items():
+            if ord_ == -1:
+                px = x_pow_cache[ex]
+                if k < len(px):
+                    rhs[k] -= coeff * px[k]
+            else:
+                px = x_pow_cache[ex]
+                Dp = Dpows[ord_]
+                for j, px_j in enumerate(px):
+                    if px_j == 0:
+                        continue
+                    for nn in range(N + 1):
+                        contrib = Fraction(0)
+                        if abs(j - nn) == k:
+                            contrib += px_j / 2
+                        if j + nn == k:
+                            contrib += px_j / 2
+                        if contrib != 0:
+                            for m in range(N + 1):
+                                if Dp[nn][m] != 0:
+                                    M[k][m] += coeff * contrib * Dp[nn][m]
+
+    # Side condition rows
+    row = N - order + 1
+    for (ord_, x0), v in sorted(ics.items()):
+        Dp = Dpows[ord_]
+        for nn in range(N + 1):
+            tval = T_n_x0(nn, x0)
+            if tval == 0:
+                continue
+            for m in range(N + 1):
+                if Dp[nn][m] != 0:
+                    M[row][m] += tval * Dp[nn][m]
+        rhs[row] = v
+        row += 1
+
+    # Gaussian elimination
+    for col in range(n):
+        piv = None
+        for r in range(col, n):
+            if M[r][col] != 0:
+                piv = r
+                break
+        if piv is None:
+            raise ValueError("singular Chebyshev system (cannot solve)")
+        if piv != col:
+            M[col], M[piv] = M[piv], M[col]
+            rhs[col], rhs[piv] = rhs[piv], rhs[col]
+        for r in range(col + 1, n):
+            if M[r][col] != 0:
+                f = M[r][col] / M[col][col]
+                for c2 in range(col, n):
+                    M[r][c2] -= f * M[col][c2]
+                rhs[r] -= f * rhs[col]
+    c = [Fraction(0)] * n
+    for r in range(n - 1, -1, -1):
+        s = rhs[r]
+        for c2 in range(r + 1, n):
+            s -= M[r][c2] * c[c2]
+        if M[r][r] == 0:
+            raise ValueError("singular Chebyshev system (cannot solve)")
+        c[r] = s / M[r][r]
+    return c
+
+
 def verify_equation(eq_str, proof, precision):
     """Verify a proof against an equation string. Returns True/False.
 
@@ -475,11 +648,12 @@ def verify_equation(eq_str, proof, precision):
     Raises ValueError if precision is missing/invalid (caller error,
     except for ODEs where it's optional).
     """
-    # ODEs: k is meaningless; allow empty.
-    _, _, _, _, ode_spec = circuit_mod.parse_polynomial(eq_str)
-    if ode_spec is None and not str(precision).strip():
+    # ODEs/Chebyshev: k is meaningless; allow empty.
+    _, _, _, _, ode_spec, cheb_spec = circuit_mod.parse_polynomial(eq_str)
+    is_func_eq = ode_spec is not None or cheb_spec is not None
+    if not is_func_eq and not str(precision).strip():
         raise ValueError("precision k is required to verify")
-    if ode_spec is not None and not str(precision).strip():
+    if is_func_eq and not str(precision).strip():
         precision = "1"  # dummy; canonical has no k
     try:
         if not isinstance(proof, dict):
@@ -505,29 +679,43 @@ def verify_equation(eq_str, proof, precision):
             if deg_verify > deg_prove:
                 return False
             # Verify against the deg_prove circuit.
-            # Reconstruct eq_str with deg_prove for circuit building.
-            # We use the proof's canonical directly via a dummy compile.
-            # Simpler: verify the proof's equation matches a circuit built
-            # with deg_prove. We'll reconstruct the input string.
-            # For now, use the stored spec to build a circuit directly.
-            # (We need an eq_str; reconstruct from spec.)
-            # Actually, easiest: the proof is valid if the Bulletproofs
-            # verifies against a circuit with the proof's spec.
-            # Build circuit manually:
             _spec_prove = {
                 'diffeq': proof_diffeq,
                 'order': ps['order'],
                 'ics': proof_ics,
                 'deg': deg_prove,
             }
-            # Create a circuit via compile with a reconstructed string.
-            # Reconstruct: ode(<diffeq_str>,<ics_str>,deg=<d>)
-            # For simplicity, we verify using the proof's own canonical
-            # by checking the proof dict directly with bulletproof.
-            # We need a Circuit object; build one via a helper.
             circ = circuit_mod.Circuit(
                 "ode_dummy", {0: (0, 0)}, "1", False, False,
                 ode_spec=_spec_prove)
+            if proof_eq != circ.canonical:
+                return False
+            return bulletproof.verify(circ, proof)
+        # Chebyshev coarse verification: same idea.
+        if cheb_spec is not None and "cheb_spec" in proof:
+            from fractions import Fraction as _Fr
+            ps = proof["cheb_spec"]
+            proof_diffeq = {(ex, ord_): _Fr(coeff_str)
+                            for (ex, ord_), coeff_str in ps['diffeq']}
+            proof_ics = {(ord_, x0): _Fr(v_str)
+                         for (ord_, x0), v_str in ps['ics']}
+            deg_prove = ps['deg']
+            deg_verify = cheb_spec['deg']
+            if (proof_diffeq != cheb_spec['diffeq'] or
+                    ps['order'] != cheb_spec['order'] or
+                    proof_ics != cheb_spec['ics']):
+                return False
+            if deg_verify > deg_prove:
+                return False
+            _spec_prove = {
+                'diffeq': proof_diffeq,
+                'order': ps['order'],
+                'ics': proof_ics,
+                'deg': deg_prove,
+            }
+            circ = circuit_mod.Circuit(
+                "cheb_dummy", {0: (0, 0)}, "1", False, False,
+                cheb_spec=_spec_prove)
             if proof_eq != circ.canonical:
                 return False
             return bulletproof.verify(circ, proof)
