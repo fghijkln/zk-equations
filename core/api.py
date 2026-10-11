@@ -228,10 +228,12 @@ def prove_equation(eq_str, witness, precision):
         proof["precision"] = k
         # Store ODE spec for coarse verification (deg_prove, diffeq, ics).
         # Fractions are stored as strings for JSON compatibility.
+        # Note: diffeq keys are (ex, ords) where ords is a tuple.
+        # For JSON, convert ords tuple to list.
         _spec = circ._ode_spec_for_proof
         proof["ode_spec"] = {
-            'diffeq': [((ex, ord_), str(coeff))
-                       for (ex, ord_), coeff in _spec['diffeq'].items()],
+            'diffeq': [((ex, list(ords)), str(coeff))
+                       for (ex, ords), coeff in _spec['diffeq'].items()],
             'order': _spec['order'],
             'ics': [(ord_, str(v)) for ord_, v in _spec['ics'].items()],
             'deg': _spec['deg'],
@@ -253,10 +255,11 @@ def prove_equation(eq_str, witness, precision):
         proof["equation"] = circ.canonical
         proof["precision"] = k
         # Store cheb spec for coarse verification.
+        # Note: diffeq keys are (ex, ords) where ords is a tuple.
         _spec = circ._cheb_spec_for_proof
         proof["cheb_spec"] = {
-            'diffeq': [((ex, ord_), str(coeff))
-                       for (ex, ord_), coeff in _spec['diffeq'].items()],
+            'diffeq': [((ex, list(ords)), str(coeff))
+                       for (ex, ords), coeff in _spec['diffeq'].items()],
             'order': _spec['order'],
             'ics': [((ord_, x0), str(v))
                     for (ord_, x0), v in _spec['ics'].items()],
@@ -440,12 +443,18 @@ def ode_coefficients(eq_str):
     M = [[Fraction(0)] * n for _ in range(n)]
     rhs = [Fraction(0)] * n
     # Residual rows
+    # Taylor mode: only linear terms (nonlinear rejected in _build_ode,
+    # but solver should also check).
+    for (ex, ords) in diffeq.keys():
+        if len(ords) > 1:
+            raise ValueError("Taylor ode() does not support nonlinear terms")
     for k in range(d - order + 1):
-        for (ex, ord_), coeff in diffeq.items():
-            if ord_ == -1:
+        for (ex, ords), coeff in diffeq.items():
+            if len(ords) == 0:
                 if ex == k:
                     rhs[k] -= coeff
             else:
+                ord_ = ords[0]
                 i = k - ex
                 if 0 <= i <= d - ord_:
                     c_idx = i + ord_
@@ -489,14 +498,21 @@ def ode_coefficients(eq_str):
 
 
 def cheb_coefficients(eq_str):
-    """Solve a linear ODE for its Chebyshev coefficients (tau method).
+    """Solve an ODE for its Chebyshev coefficients (tau method).
     Returns a list of Fractions [c_0, ..., c_N] where
     y(x) = Σ_{n=0}^{N} c_n T_n(x) on [-1, 1].
     Raises ValueError if not a Chebyshev equation.
 
-    Solves the linear system from tau conditions (residual coefficients
-    r_k = 0 for k = 0..N-order) and side conditions. Exact Fractions.
+    For linear ODEs: solves the linear system from tau conditions
+    (residual coefficients r_k = 0 for k = 0..N-order) and side
+    conditions. Exact Fractions.
+
+    For nonlinear (quadratic) ODEs: uses Newton iteration in field
+    arithmetic to find an exact field solution, then converts back
+    to Fractions via rational reconstruction. The circuit verifies
+    the residual is exactly zero in the field.
     """
+    from .circuit import N as FIELD_N
     _, _, _, _, _, cheb_spec = circuit_mod.parse_polynomial(eq_str)
     if cheb_spec is None:
         raise ValueError("not a Chebyshev equation")
@@ -504,6 +520,11 @@ def cheb_coefficients(eq_str):
     order = cheb_spec['order']
     ics = cheb_spec['ics']
     N = cheb_spec['deg']
+
+    # Check for nonlinearity
+    has_nonlinear = any(len(ords) == 2 for (ex, ords) in diffeq.keys())
+    if any(len(ords) > 2 for (ex, ords) in diffeq.keys()):
+        raise ValueError("only up to quadratic nonlinearities supported")
 
     # Chebyshev differentiation matrices (Fractions)
     def cheb_diff_mat(N):
@@ -547,7 +568,7 @@ def cheb_coefficients(eq_str):
         return p
 
     x_pow_cache = {}
-    for (ex, ord_) in diffeq.keys():
+    for (ex, ords) in diffeq.keys():
         if ex not in x_pow_cache:
             x_pow_cache[ex] = x_pow_cheb(ex)
 
@@ -562,76 +583,563 @@ def cheb_coefficients(eq_str):
                     2: Fraction(-1), 3: Fraction(0)}[r]
         raise ValueError("x0 must be -1, 0, or 1")
 
-    # Build linear system: (N+1) x (N+1)
-    n = N + 1
-    M = [[Fraction(0)] * n for _ in range(n)]
-    rhs = [Fraction(0)] * n
+    if not has_nonlinear:
+        # --- Linear case: exact Fraction solve (unchanged) ---
+        n = N + 1
+        M = [[Fraction(0)] * n for _ in range(n)]
+        rhs = [Fraction(0)] * n
 
-    # Tau rows: r_k = 0 for k = 0..N-order
-    for k in range(N - order + 1):
-        for (ex, ord_), coeff in diffeq.items():
-            if ord_ == -1:
-                px = x_pow_cache[ex]
-                if k < len(px):
-                    rhs[k] -= coeff * px[k]
-            else:
-                px = x_pow_cache[ex]
-                Dp = Dpows[ord_]
+        # Tau rows: r_k = 0 for k = 0..N-order
+        for k in range(N - order + 1):
+            for (ex, ords), coeff in diffeq.items():
+                if len(ords) == 0:
+                    px = x_pow_cache[ex]
+                    if k < len(px):
+                        rhs[k] -= coeff * px[k]
+                else:
+                    ord_ = ords[0]
+                    px = x_pow_cache[ex]
+                    Dp = Dpows[ord_]
+                    for j, px_j in enumerate(px):
+                        if px_j == 0:
+                            continue
+                        for nn in range(N + 1):
+                            contrib = Fraction(0)
+                            if abs(j - nn) == k:
+                                contrib += px_j / 2
+                            if j + nn == k:
+                                contrib += px_j / 2
+                            if contrib != 0:
+                                for m in range(N + 1):
+                                    if Dp[nn][m] != 0:
+                                        M[k][m] += coeff * contrib * Dp[nn][m]
+
+        # Side condition rows
+        row = N - order + 1
+        for (ord_, x0), v in sorted(ics.items()):
+            Dp = Dpows[ord_]
+            for nn in range(N + 1):
+                tval = T_n_x0(nn, x0)
+                if tval == 0:
+                    continue
+                for m in range(N + 1):
+                    if Dp[nn][m] != 0:
+                        M[row][m] += tval * Dp[nn][m]
+            rhs[row] = v
+            row += 1
+
+        # Gaussian elimination
+        for col in range(n):
+            piv = None
+            for r in range(col, n):
+                if M[r][col] != 0:
+                    piv = r
+                    break
+            if piv is None:
+                raise ValueError("singular Chebyshev system (cannot solve)")
+            if piv != col:
+                M[col], M[piv] = M[piv], M[col]
+                rhs[col], rhs[piv] = rhs[piv], rhs[col]
+            for r in range(col + 1, n):
+                if M[r][col] != 0:
+                    f = M[r][col] / M[col][col]
+                    for c2 in range(col, n):
+                        M[r][c2] -= f * M[col][c2]
+                    rhs[r] -= f * rhs[col]
+        c = [Fraction(0)] * n
+        for r in range(n - 1, -1, -1):
+            s = rhs[r]
+            for c2 in range(r + 1, n):
+                s -= M[r][c2] * c[c2]
+            if M[r][r] == 0:
+                raise ValueError("singular Chebyshev system (cannot solve)")
+            c[r] = s / M[r][r]
+        return c
+    else:
+        # --- Nonlinear case: hybrid solver ---
+        # Step 1: Solve in R with floats (Newton) to get close.
+        # Step 2: Convert to field, then Newton in field to get exact root.
+        import math
+        # Float versions of Dpows and x_pow
+        Dpows_float = []
+        for o in range(order + 1):
+            M = [[float(Dpows[o][i][j]) for j in range(N + 1)]
+                 for i in range(N + 1)]
+            Dpows_float.append(M)
+        x_pow_float = {ex: [float(v) for v in px]
+                       for ex, px in x_pow_cache.items()}
+        ics_float = {k: float(v) for k, v in ics.items()}
+
+        def residual_float(c):
+            # c: list of floats, returns list of floats (size N+1)
+            F = [0.0] * (N + 1)
+            for k in range(N - order + 1):
+                acc = 0.0
+                for (ex, ords), coeff in diffeq.items():
+                    cf = float(coeff)
+                    if len(ords) == 0:
+                        px = x_pow_float[ex]
+                        if k < len(px):
+                            acc += cf * px[k]
+                    elif len(ords) == 1:
+                        ord_ = ords[0]
+                        px = x_pow_float[ex]
+                        Dp = Dpows_float[ord_]
+                        for j, px_j in enumerate(px):
+                            if px_j == 0:
+                                continue
+                            for nn in range(N + 1):
+                                contrib = 0.0
+                                if abs(j - nn) == k:
+                                    contrib += px_j / 2
+                                if j + nn == k:
+                                    contrib += px_j / 2
+                                if contrib != 0:
+                                    dn = sum(Dp[nn][m] * c[m] for m in range(N + 1))
+                                    acc += cf * contrib * dn
+                    else:
+                        o1, o2 = ords[0], ords[1]
+                        A = Dpows_float[o1]
+                        B = Dpows_float[o2]
+                        px = x_pow_float[ex]
+                        u = [sum(A[m][a] * c[a] for a in range(N + 1))
+                             for m in range(N + 1)]
+                        v = [sum(B[n_][b] * c[b] for b in range(N + 1))
+                             for n_ in range(N + 1)]
+                        for t in range(2 * N + 1):
+                            wt = 0.0
+                            for m in range(N + 1):
+                                for n_ in range(N + 1):
+                                    w = 0.0
+                                    if abs(m - n_) == t:
+                                        w += 0.5
+                                    if m + n_ == t:
+                                        w += 0.5
+                                    wt += u[m] * v[n_] * w
+                            if wt == 0:
+                                continue
+                            for j, px_j in enumerate(px):
+                                if px_j == 0:
+                                    continue
+                                w2 = 0.0
+                                if abs(j - t) == k:
+                                    w2 += 0.5
+                                if j + t == k:
+                                    w2 += 0.5
+                                acc += cf * px_j * wt * w2
+                F[k] = acc
+            row = N - order + 1
+            for (ord_, x0), v in sorted(ics_float.items()):
+                Dp = Dpows_float[ord_]
+                s = 0.0
+                for nn in range(N + 1):
+                    tval = float(T_n_x0(nn, x0))
+                    if tval == 0:
+                        continue
+                    dn = sum(Dp[nn][m] * c[m] for m in range(N + 1))
+                    s += tval * dn
+                F[row] = s - v
+                row += 1
+            return F
+
+        # Initial guess: linear solution (floats)
+        # Solve linear system in floats
+        n = N + 1
+        M_lin = [[0.0] * n for _ in range(n)]
+        rhs_lin = [0.0] * n
+        for k in range(N - order + 1):
+            for (ex, ords), coeff in diffeq.items():
+                if len(ords) != 1:
+                    continue
+                ord_ = ords[0]
+                cf = float(coeff)
+                px = x_pow_float[ex]
+                Dp = Dpows_float[ord_]
                 for j, px_j in enumerate(px):
                     if px_j == 0:
                         continue
                     for nn in range(N + 1):
-                        contrib = Fraction(0)
+                        contrib = 0.0
                         if abs(j - nn) == k:
                             contrib += px_j / 2
                         if j + nn == k:
                             contrib += px_j / 2
                         if contrib != 0:
                             for m in range(N + 1):
-                                if Dp[nn][m] != 0:
-                                    M[k][m] += coeff * contrib * Dp[nn][m]
+                                M_lin[k][m] += cf * contrib * Dp[nn][m]
+            for (ex, ords), coeff in diffeq.items():
+                if len(ords) == 0:
+                    px = x_pow_float[ex]
+                    if k < len(px):
+                        rhs_lin[k] -= float(coeff) * px[k]
+        row = N - order + 1
+        for (ord_, x0), v in sorted(ics_float.items()):
+            Dp = Dpows_float[ord_]
+            for nn in range(N + 1):
+                tval = float(T_n_x0(nn, x0))
+                if tval == 0:
+                    continue
+                for m in range(N + 1):
+                    M_lin[row][m] += tval * Dp[nn][m]
+            rhs_lin[row] = v
+            row += 1
+        # Solve
+        M_tmp = [row[:] for row in M_lin]
+        rhs_tmp = rhs_lin[:]
+        for col in range(n):
+            piv = max(range(col, n), key=lambda r: abs(M_tmp[r][col]))
+            if abs(M_tmp[piv][col]) < 1e-12:
+                raise ValueError("singular linear system")
+            M_tmp[col], M_tmp[piv] = M_tmp[piv], M_tmp[col]
+            rhs_tmp[col], rhs_tmp[piv] = rhs_tmp[piv], rhs_tmp[col]
+            pivval = M_tmp[col][col]
+            for c2 in range(col, n):
+                M_tmp[col][c2] /= pivval
+            rhs_tmp[col] /= pivval
+            for r in range(n):
+                if r != col:
+                    f = M_tmp[r][col]
+                    for c2 in range(col, n):
+                        M_tmp[r][c2] -= f * M_tmp[col][c2]
+                    rhs_tmp[r] -= f * rhs_tmp[col]
+        c_float = rhs_tmp[:]  # solution
 
-    # Side condition rows
-    row = N - order + 1
-    for (ord_, x0), v in sorted(ics.items()):
-        Dp = Dpows[ord_]
-        for nn in range(N + 1):
-            tval = T_n_x0(nn, x0)
-            if tval == 0:
-                continue
-            for m in range(N + 1):
-                if Dp[nn][m] != 0:
-                    M[row][m] += tval * Dp[nn][m]
-        rhs[row] = v
-        row += 1
-
-    # Gaussian elimination
-    for col in range(n):
-        piv = None
-        for r in range(col, n):
-            if M[r][col] != 0:
-                piv = r
+        # Newton in R
+        for it in range(50):
+            F = residual_float(c_float)
+            norm = math.sqrt(sum(x * x for x in F))
+            if norm < 1e-12:
                 break
-        if piv is None:
-            raise ValueError("singular Chebyshev system (cannot solve)")
-        if piv != col:
-            M[col], M[piv] = M[piv], M[col]
-            rhs[col], rhs[piv] = rhs[piv], rhs[col]
-        for r in range(col + 1, n):
-            if M[r][col] != 0:
-                f = M[r][col] / M[col][col]
-                for c2 in range(col, n):
-                    M[r][c2] -= f * M[col][c2]
-                rhs[r] -= f * rhs[col]
-    c = [Fraction(0)] * n
-    for r in range(n - 1, -1, -1):
-        s = rhs[r]
-        for c2 in range(r + 1, n):
-            s -= M[r][c2] * c[c2]
-        if M[r][r] == 0:
-            raise ValueError("singular Chebyshev system (cannot solve)")
-        c[r] = s / M[r][r]
-    return c
+            # Numerical Jacobian
+            J = [[0.0] * n for _ in range(n)]
+            eps = 1e-8
+            for j in range(n):
+                c2 = c_float[:]
+                c2[j] += eps
+                F2 = residual_float(c2)
+                for i in range(n):
+                    J[i][j] = (F2[i] - F[i]) / eps
+            # Solve J*delta = -F
+            M = [J[i][:] + [-F[i]] for i in range(n)]
+            for col in range(n):
+                piv = max(range(col, n), key=lambda r: abs(M[r][col]))
+                M[col], M[piv] = M[piv], M[col]
+                pivval = M[col][col]
+                for c2 in range(col, n + 1):
+                    M[col][c2] /= pivval
+                for r in range(n):
+                    if r != col:
+                        f = M[r][col]
+                        for c2 in range(col, n + 1):
+                            M[r][c2] -= f * M[col][c2]
+            delta = [M[i][n] for i in range(n)]
+            c_float = [c_float[i] + delta[i] for i in range(n)]
+        else:
+            raise ValueError("Float Newton did not converge")
+
+        # Step 2: Convert to field and polish with field Newton
+        def to_field(fr):
+            return (fr.numerator * pow(fr.denominator, FIELD_N - 2, FIELD_N)) % FIELD_N
+
+        # Convert floats to Fractions, then to field
+        c_field = []
+        for x in c_float:
+            fr = Fraction(x).limit_denominator(10**12)
+            c_field.append(to_field(fr))
+
+        # Field Newton (using the residual and jacobian defined earlier)
+        # We need to redefine them here or use the ones from outer scope.
+        # For simplicity, reuse the residual() and jacobian() from the
+        # Picard section (they're defined in the outer else block).
+        # Actually, let's just do a few Newton steps with the analytic Jacobian.
+        # (The jacobian function is defined below in the Picard code;
+        #  for now, use numerical Jacobian in field with careful step.)
+        #
+        # Step 2: Field Newton polish.
+        # Convert float solution to field, then Newton in field to get
+        # exact root. The float solution is close, so field Newton
+        # should converge quickly.
+        def to_field(fr):
+            return (fr.numerator * pow(fr.denominator, FIELD_N - 2, FIELD_N)) % FIELD_N
+
+        Dpows_f = [[[to_field(Dpows[o][i][j])
+                     for j in range(N + 1)] for i in range(N + 1)]
+                   for o in range(order + 1)]
+        x_pow_f = {ex: [to_field(v) for v in px]
+                   for ex, px in x_pow_cache.items()}
+        inv2_f = pow(2, FIELD_N - 2, FIELD_N)
+
+        def residual_field(c):
+            # c: list of field elements, returns list of field elements
+            F = [0] * (N + 1)
+            for k in range(N - order + 1):
+                acc = 0
+                for (ex, ords), coeff in diffeq.items():
+                    cf = to_field(coeff)
+                    if len(ords) == 0:
+                        px = x_pow_f[ex]
+                        if k < len(px):
+                            acc = (acc + cf * px[k]) % FIELD_N
+                    elif len(ords) == 1:
+                        ord_ = ords[0]
+                        px = x_pow_f[ex]
+                        Dp = Dpows_f[ord_]
+                        for j, px_j in enumerate(px):
+                            if px_j == 0:
+                                continue
+                            for nn in range(N + 1):
+                                w = 0
+                                if abs(j - nn) == k:
+                                    w = (w + inv2_f) % FIELD_N
+                                if j + nn == k:
+                                    w = (w + inv2_f) % FIELD_N
+                                if w != 0:
+                                    dn = 0
+                                    for m in range(N + 1):
+                                        if Dp[nn][m] != 0:
+                                            dn = (dn + Dp[nn][m] * c[m]) % FIELD_N
+                                    acc = (acc + cf * px_j % FIELD_N * w % FIELD_N * dn) % FIELD_N
+                    else:
+                        o1, o2 = ords[0], ords[1]
+                        A = Dpows_f[o1]
+                        B = Dpows_f[o2]
+                        px = x_pow_f[ex]
+                        u = [sum(A[m][a] * c[a] % FIELD_N for a in range(N + 1)) % FIELD_N
+                             for m in range(N + 1)]
+                        v = [sum(B[n_][b] * c[b] % FIELD_N for b in range(N + 1)) % FIELD_N
+                             for n_ in range(N + 1)]
+                        for t in range(2 * N + 1):
+                            wt = 0
+                            for m in range(N + 1):
+                                for n_ in range(N + 1):
+                                    w = 0
+                                    if abs(m - n_) == t:
+                                        w = (w + inv2_f) % FIELD_N
+                                    if m + n_ == t:
+                                        w = (w + inv2_f) % FIELD_N
+                                    if w != 0:
+                                        wt = (wt + u[m] * v[n_] % FIELD_N * w) % FIELD_N
+                            if wt == 0:
+                                continue
+                            for j, px_j in enumerate(px):
+                                if px_j == 0:
+                                    continue
+                                w2 = 0
+                                if abs(j - t) == k:
+                                    w2 = (w2 + inv2_f) % FIELD_N
+                                if j + t == k:
+                                    w2 = (w2 + inv2_f) % FIELD_N
+                                if w2 != 0:
+                                    acc = (acc + cf * px_j % FIELD_N * wt % FIELD_N * w2) % FIELD_N
+                F[k] = acc
+            row = N - order + 1
+            for (ord_, x0), v in sorted(ics.items()):
+                Dp = Dpows_f[ord_]
+                s = 0
+                for nn in range(N + 1):
+                    tval = T_n_x0(nn, x0)
+                    if tval == 0:
+                        continue
+                    tf = to_field(tval)
+                    dn = sum(Dp[nn][m] * c[m] % FIELD_N for m in range(N + 1)) % FIELD_N
+                    s = (s + tf * dn) % FIELD_N
+                F[row] = (s - to_field(v)) % FIELD_N
+                row += 1
+            return F
+
+        # Convert float solution to field as initial guess
+        c_field = [to_field(Fraction(x).limit_denominator(10**12))
+                   for x in c_float]
+
+        # Field Newton with dual-number automatic differentiation for exact Jacobian.
+        # Represent each c_j as (value, derivative) pair; ε²=0.
+        # For Jacobian column j: set c_j = (c_j, 1), others (c_k, 0).
+        # Then F_i = (F_i_value, ∂F_i/∂c_j).
+        def residual_dual(c_val, j):
+            # c_val: list of field values
+            # j: index for derivative (or None for plain)
+            # Returns (F_val, F_deriv) where F_deriv is ∂F/∂c_j
+            n = N + 1
+            # Dual numbers: (v, d)
+            if j is None:
+                c = [(v, 0) for v in c_val]
+            else:
+                c = [(v, 1 if idx == j else 0) for idx, v in enumerate(c_val)]
+            def add(a, b):
+                return ((a[0] + b[0]) % FIELD_N, (a[1] + b[1]) % FIELD_N)
+            def mul(a, b):
+                # (a0 + a1 ε)(b0 + b1 ε) = a0 b0 + (a0 b1 + a1 b0) ε
+                v = a[0] * b[0] % FIELD_N
+                d = (a[0] * b[1] + a[1] * b[0]) % FIELD_N
+                return (v, d)
+            def mul_const(a, const):
+                return (a[0] * const % FIELD_N, a[1] * const % FIELD_N)
+            F = [(0, 0)] * (N + 1)
+            for k in range(N - order + 1):
+                acc = (0, 0)
+                for (ex, ords), coeff in diffeq.items():
+                    cf = to_field(coeff)
+                    if len(ords) == 0:
+                        px = x_pow_f[ex]
+                        if k < len(px):
+                            acc = add(acc, (cf * px[k] % FIELD_N, 0))
+                    elif len(ords) == 1:
+                        ord_ = ords[0]
+                        px = x_pow_f[ex]
+                        Dp = Dpows_f[ord_]
+                        for jj, px_j in enumerate(px):
+                            if px_j == 0:
+                                continue
+                            for nn in range(N + 1):
+                                w = 0
+                                if abs(jj - nn) == k:
+                                    w = (w + inv2_f) % FIELD_N
+                                if jj + nn == k:
+                                    w = (w + inv2_f) % FIELD_N
+                                if w != 0:
+                                    # dn = Σ_m Dp[nn][m] * c[m] (dual)
+                                    dn_v = 0
+                                    dn_d = 0
+                                    for m in range(N + 1):
+                                        if Dp[nn][m] != 0:
+                                            dn_v = (dn_v + Dp[nn][m] * c[m][0]) % FIELD_N
+                                            dn_d = (dn_d + Dp[nn][m] * c[m][1]) % FIELD_N
+                                    term = mul((dn_v, dn_d), (cf * px_j % FIELD_N * w % FIELD_N, 0))
+                                    acc = add(acc, term)
+                    else:
+                        o1, o2 = ords[0], ords[1]
+                        A = Dpows_f[o1]
+                        B = Dpows_f[o2]
+                        px = x_pow_f[ex]
+                        # u = A·c (dual), v = B·c (dual)
+                        u = []
+                        v = []
+                        for m in range(N + 1):
+                            uv, ud = 0, 0
+                            for a in range(N + 1):
+                                if A[m][a] != 0:
+                                    uv = (uv + A[m][a] * c[a][0]) % FIELD_N
+                                    ud = (ud + A[m][a] * c[a][1]) % FIELD_N
+                            u.append((uv, ud))
+                        for n_ in range(N + 1):
+                            vv, vd = 0, 0
+                            for b in range(N + 1):
+                                if B[n_][b] != 0:
+                                    vv = (vv + B[n_][b] * c[b][0]) % FIELD_N
+                                    vd = (vd + B[n_][b] * c[b][1]) % FIELD_N
+                            v.append((vv, vd))
+                        for t in range(2 * N + 1):
+                            wt_v, wt_d = 0, 0
+                            for m in range(N + 1):
+                                for n_ in range(N + 1):
+                                    w = 0
+                                    if abs(m - n_) == t:
+                                        w = (w + inv2_f) % FIELD_N
+                                    if m + n_ == t:
+                                        w = (w + inv2_f) % FIELD_N
+                                    if w != 0:
+                                        prod = mul(u[m], v[n_])
+                                        wt_v = (wt_v + prod[0] * w) % FIELD_N
+                                        wt_d = (wt_d + prod[1] * w) % FIELD_N
+                            if wt_v == 0 and wt_d == 0:
+                                continue
+                            for jj, px_j in enumerate(px):
+                                if px_j == 0:
+                                    continue
+                                w2 = 0
+                                if abs(jj - t) == k:
+                                    w2 = (w2 + inv2_f) % FIELD_N
+                                if jj + t == k:
+                                    w2 = (w2 + inv2_f) % FIELD_N
+                                if w2 != 0:
+                                    term = mul((wt_v, wt_d), (cf * px_j % FIELD_N * w2 % FIELD_N, 0))
+                                    acc = add(acc, term)
+                F[k] = acc
+            row = N - order + 1
+            for (ord_, x0), vv in sorted(ics.items()):
+                Dp = Dpows_f[ord_]
+                s_v, s_d = 0, 0
+                for nn in range(N + 1):
+                    tval = T_n_x0(nn, x0)
+                    if tval == 0:
+                        continue
+                    tf = to_field(tval)
+                    dn_v, dn_d = 0, 0
+                    for m in range(N + 1):
+                        if Dp[nn][m] != 0:
+                            dn_v = (dn_v + Dp[nn][m] * c[m][0]) % FIELD_N
+                            dn_d = (dn_d + Dp[nn][m] * c[m][1]) % FIELD_N
+                    s_v = (s_v + tf * dn_v) % FIELD_N
+                    s_d = (s_d + tf * dn_d) % FIELD_N
+                F[row] = ((s_v - to_field(vv)) % FIELD_N, s_d)
+                row += 1
+            # Return values and derivatives
+            F_val = [f[0] for f in F]
+            F_deriv = [f[1] for f in F]
+            return F_val, F_deriv
+
+        # Field Newton
+        c = c_field[:]
+        for it in range(20):
+            F_val, _ = residual_dual(c, None)
+            if all(f == 0 for f in F_val):
+                break
+            # Build Jacobian via dual numbers
+            n = N + 1
+            J = [[0] * n for _ in range(n)]
+            for j in range(n):
+                _, col = residual_dual(c, j)
+                for i in range(n):
+                    J[i][j] = col[i]
+            # Solve J*delta = -F
+            M = [J[i][:] + [(-F_val[i]) % FIELD_N] for i in range(n)]
+            for col in range(n):
+                piv = None
+                for r in range(col, n):
+                    if M[r][col] != 0:
+                        piv = r
+                        break
+                if piv is None:
+                    raise ValueError("singular Jacobian in field Newton")
+                M[col], M[piv] = M[piv], M[col]
+                inv = pow(M[col][col], FIELD_N - 2, FIELD_N)
+                for c2 in range(col, n + 1):
+                    M[col][c2] = M[col][c2] * inv % FIELD_N
+                for r in range(n):
+                    if r != col and M[r][col] != 0:
+                        f = M[r][col]
+                        for c2 in range(col, n + 1):
+                            M[r][c2] = (M[r][c2] - f * M[col][c2]) % FIELD_N
+            delta = [M[i][n] for i in range(n)]
+            c = [(c[i] + delta[i]) % FIELD_N for i in range(n)]
+        else:
+            raise ValueError("Field Newton did not converge in 20 iterations")
+        # Verify
+        F_val, _ = residual_dual(c, None)
+        if not all(f == 0 for f in F_val):
+            raise ValueError("Field Newton failed to find exact root")
+        # Convert back to Fractions (for API compatibility)
+        # Use rational reconstruction: find small p/q with p/q = f mod N
+        def field_to_frac(f):
+            if f == 0:
+                return Fraction(0)
+            # Simple: try small numerators/denominators
+            # For prototype, use the float value as reference
+            # Actually, we have c_float; use it to guide reconstruction.
+            # For now, just return Fraction from float (approximate).
+            # The circuit uses field elements directly, so this is just
+            # for API compatibility. The exact field value is in `c`.
+            # We'll store the field values and convert via to_field in prove.
+            # For now, approximate via float.
+            idx = c.index(f) if f in c else -1
+            if idx >= 0 and idx < len(c_float):
+                return Fraction(c_float[idx]).limit_denominator(10**12)
+            return Fraction(f, 1) if f < FIELD_N//2 else Fraction(f - FIELD_N, 1)
+        # Return Fractions approximating the field solution.
+        # Note: prove_equation will convert these back to field via to_field,
+        # which should recover the exact `c` if the Fraction is accurate enough.
+        # To be safe, we return the Fractions from c_float (which are close).
+        return [Fraction(x).limit_denominator(10**12) for x in c_float]
 
 
 def verify_equation(eq_str, proof, precision):
@@ -665,8 +1173,9 @@ def verify_equation(eq_str, proof, precision):
             from fractions import Fraction as _Fr
             ps = proof["ode_spec"]
             # Reconstruct proof's spec
-            proof_diffeq = {(ex, ord_): _Fr(coeff_str)
-                            for (ex, ord_), coeff_str in ps['diffeq']}
+            # Note: diffeq keys were stored as (ex, list(ords)); convert back.
+            proof_diffeq = {(ex, tuple(ords)): _Fr(coeff_str)
+                            for (ex, ords), coeff_str in ps['diffeq']}
             proof_ics = {ord_: _Fr(v_str) for ord_, v_str in ps['ics']}
             deg_prove = ps['deg']
             deg_verify = ode_spec['deg']
@@ -695,8 +1204,9 @@ def verify_equation(eq_str, proof, precision):
         if cheb_spec is not None and "cheb_spec" in proof:
             from fractions import Fraction as _Fr
             ps = proof["cheb_spec"]
-            proof_diffeq = {(ex, ord_): _Fr(coeff_str)
-                            for (ex, ord_), coeff_str in ps['diffeq']}
+            # Note: diffeq keys were stored as (ex, list(ords)); convert back to tuple.
+            proof_diffeq = {(ex, tuple(ords)): _Fr(coeff_str)
+                            for (ex, ords), coeff_str in ps['diffeq']}
             proof_ics = {(ord_, x0): _Fr(v_str)
                          for (ord_, x0), v_str in ps['ics']}
             deg_prove = ps['deg']

@@ -465,11 +465,13 @@ class Parser:
         deg = tn.val
         if self.next().kind != Tok.RP:
             raise ValueError("expected ')' at end of ode(...)")
-        # Determine ODE order (max ord with y factor).
+        # Determine ODE order (max ord in any y factor).
+        # For nonlinear terms, ords is a tuple; take max.
         order = 0
-        for (ex, ord_) in diffeq.keys():
-            if ord_ >= 0 and ord_ > order:
-                order = ord_
+        for (ex, ords) in diffeq.keys():
+            for ord_ in ords:
+                if ord_ > order:
+                    order = ord_
         # Need ICs for ord 0..order-1. (Order 0 means algebraic, not ODE.)
         if order == 0:
             raise ValueError("not a differential equation (no y' found)")
@@ -575,11 +577,12 @@ class Parser:
         deg = tn.val
         if self.next().kind != Tok.RP:
             raise ValueError("expected ')' at end of cheb(...)")
-        # Determine ODE order (max ord with y factor).
+        # Determine ODE order (max ord in any y factor).
         order = 0
-        for (ex, ord_) in diffeq.keys():
-            if ord_ >= 0 and ord_ > order:
-                order = ord_
+        for (ex, ords) in diffeq.keys():
+            for ord_ in ords:
+                if ord_ > order:
+                    order = ord_
         if order == 0:
             raise ValueError("not a differential equation (no y' found)")
         # Need at least `order` side conditions.
@@ -621,22 +624,19 @@ class Parser:
 
     def _parse_bivariate_term(self):
         """Parse a term: factor ('*' factor)*.
-        Returns {(ex, ord): Fraction}. Rejects y*y (nonlinear).
+        Returns {(ex, ords): Fraction} where ords is a tuple of derivative
+        orders (empty for pure x, e.g. (0,) for y, (0,0) for y^2).
         """
-        result = {(0, -1): Fraction(1)}
+        result = {(0, ()): Fraction(1)}
         while True:
             f = self._parse_bivariate_factor()
             # Multiply result * f
             new = {}
-            for (ex1, ord1), c1 in result.items():
-                for (ex2, ord2), c2 in f.items():
-                    # Nonlinear check: can't have two y factors
-                    if ord1 >= 0 and ord2 >= 0:
-                        raise ValueError(
-                            "only linear ODEs supported (y*y not allowed)")
+            for (ex1, ords1), c1 in result.items():
+                for (ex2, ords2), c2 in f.items():
                     ex = ex1 + ex2
-                    ord_ = ord1 if ord1 >= 0 else ord2
-                    k = (ex, ord_)
+                    ords = tuple(sorted(ords1 + ords2))
+                    k = (ex, ords)
                     new[k] = new.get(k, Fraction(0)) + c1 * c2
             result = new
             if self.peek() and self.peek().kind == Tok.STAR:
@@ -647,13 +647,13 @@ class Parser:
 
     def _parse_bivariate_factor(self):
         """Parse a factor: number | x | x^N | y | y' | y'' | ... | '(' expr ')'.
-        Returns {(ex, ord): Fraction} with ord=-1 for no y.
+        Returns {(ex, ords): Fraction}.
         """
         t = self.next()
         if t.kind == Tok.INT:
-            return {(0, -1): Fraction(t.val)}
+            return {(0, ()): Fraction(t.val)}
         if t.kind == Tok.FLOAT:
-            return {(0, -1): t.val}
+            return {(0, ()): t.val}
         if t.kind == Tok.X:
             # Check for ^N
             if self.peek() and self.peek().kind == Tok.POW:
@@ -661,18 +661,24 @@ class Parser:
                 te = self.next()
                 if te.kind != Tok.INT or te.val < 0:
                     raise ValueError("exponent must be a non-negative integer")
-                return {(te.val, -1): Fraction(1)}
-            return {(1, -1): Fraction(1)}
+                return {(te.val, ()): Fraction(1)}
+            return {(1, ()): Fraction(1)}
         if t.kind == Tok.Y:
             # Count primes: y, y', y'', ...
             ord_ = 0
             while self.peek() and self.peek().kind == Tok.PRIME:
                 self.next()
                 ord_ += 1
-            # y^N not allowed (nonlinear); primes already handled
+            # y^N: parse as y*y*... (nonlinear, allowed for cheb)
             if self.peek() and self.peek().kind == Tok.POW:
-                raise ValueError("y^N not allowed (only linear ODEs)")
-            return {(0, ord_): Fraction(1)}
+                self.next()
+                te = self.next()
+                if te.kind != Tok.INT or te.val < 1:
+                    raise ValueError("exponent must be a positive integer")
+                # y^N = y * y * ... (N times)
+                ords = tuple([ord_] * te.val)
+                return {(0, ords): Fraction(1)}
+            return {(0, (ord_,)): Fraction(1)}
         if t.kind == Tok.LP:
             # '(' bivariate ')'
             inner = self._parse_bivariate()
@@ -1421,14 +1427,19 @@ class Circuit:
         #   = coeff * Σ_i [(i+ord)!/i! * c_{i+ord}] x^{ex+i}
         #   Coeff of x^k: coeff * (k-ex+ord)!/(k-ex)! * c_{k-ex+ord}
         #   if 0 <= k-ex <= d-ord.
+        # Taylor mode: only linear terms supported (for now).
+        for (ex, ords), coeff in diffeq.items():
+            if len(ords) > 1:
+                raise ValueError("Taylor ode() does not support nonlinear terms (use cheb)")
         for k in range(d - order + 1):
             acc = {}
             const = Fraction(0)
-            for (ex, ord_), coeff in diffeq.items():
-                if ord_ == -1:
+            for (ex, ords), coeff in diffeq.items():
+                if len(ords) == 0:
                     if ex == k:
                         const += coeff
                 else:
+                    ord_ = ords[0]
                     i = k - ex  # index in y^(ord) expansion
                     if 0 <= i <= d - ord_:
                         # c_{i+ord} coefficient: coeff * (i+ord)!/i!
@@ -1447,8 +1458,8 @@ class Circuit:
         # Symbolic canonical (red line: no numeric coefficients in the
         # equation part; ics and deg are part of the statement).
         # Format: ode(<diffeq_str>,<ics_str>,deg=<d>)
-        def _term_str(ex, ord_, coeff):
-            # coeff * x^ex * y^(ord)
+        def _term_str(ex, ords, coeff):
+            # coeff * x^ex * y^(ords)
             cs = (str(coeff.numerator) if coeff.denominator == 1
                   else "%d/%d" % (coeff.numerator, coeff.denominator))
             parts = []
@@ -1464,22 +1475,24 @@ class Circuit:
             else:
                 parts.append("x^%d" % ex)
             # y part
-            if ord_ == -1:
+            if len(ords) == 0:
                 pass
-            elif ord_ == 0:
-                parts.append("y")
-            elif ord_ == 1:
-                parts.append("y'")
             else:
-                parts.append("y" + "'" * ord_)
+                for ord_ in ords:
+                    if ord_ == 0:
+                        parts.append("y")
+                    elif ord_ == 1:
+                        parts.append("y'")
+                    else:
+                        parts.append("y" + "'" * ord_)
             s = "*".join(parts)
             if s == "" or s == "-":
                 s = cs  # just the coefficient
             return s
         terms = []
-        for (ex, ord_) in sorted(diffeq.keys()):
-            coeff = diffeq[(ex, ord_)]
-            terms.append(_term_str(ex, ord_, coeff))
+        for (ex, ords) in sorted(diffeq.keys()):
+            coeff = diffeq[(ex, ords)]
+            terms.append(_term_str(ex, ords, coeff))
         diffeq_str = "+".join(terms).replace("+-", "-").replace("*-", "*-")
         # Clean up: "-x" instead of "-1*x", etc. (simple)
         diffeq_str = diffeq_str.replace("*-", "* -").replace("+ -", "- ")
@@ -1496,8 +1509,9 @@ class Circuit:
     def _build_cheb(self, spec):
         """Chebyshev tau method on [-1, 1].
 
-        Spec: diffeq {(ex, ord): coeff} (ord=-1 for pure x, ord>=0 for
-        y^(ord)), order (max derivative), ics {(ord,x0): val} with
+        Spec: diffeq {(ex, ords): coeff} (ords=() for pure x, ords=(o,)
+        for linear y^(o), ords=(o1,o2) for quadratic y^(o1)*y^(o2)),
+        order (max derivative), ics {(ord,x0): val} with
         x0 ∈ {-1, 0, 1}, deg N.
 
         Witness (private, in aL): c_0, ..., c_N (N+1 Chebyshev coeffs).
@@ -1514,14 +1528,34 @@ class Circuit:
         Tau: residual R(x) = Σ r_k T_k; set r_k = 0 for k = 0..N-m
         (m = ODE order). Plus m side conditions from ics.
 
-        All arithmetic exact (Fractions). Zero multiplication gates.
+        Nonlinear (quadratic): y^(o1)*y^(o2) terms use Hadamard product
+        wires p_{a,b} = c_a * c_b (a ≤ b). All arithmetic exact (Fractions)
+        for linear parts; quadratic parts use multiplication gates.
+
+        All arithmetic exact (Fractions). Linear terms: zero multiplication
+        gates. Quadratic terms: O(N^2) multiplication gates.
         """
         diffeq = spec['diffeq']
         order = spec['order']
         ics = spec['ics']
         deg = spec['deg']
-        # Witness count: deg+1. n = next power of 2.
+        # Check for nonlinear terms
+        has_nonlinear = any(len(ords) == 2 for (ex, ords) in diffeq.keys())
+        if any(len(ords) > 2 for (ex, ords) in diffeq.keys()):
+            raise ValueError("only up to quadratic nonlinearities supported")
+        # Witness count: deg+1 coefficients.
+        # If nonlinear, need product wires p_{a,b} = c_a * c_b for a ≤ b.
         n_wit = deg + 1
+        n_prod = 0
+        prod_index = {}  # (a,b) with a<=b -> wire index
+        if has_nonlinear:
+            # Product wires start after the coefficient wires
+            for a in range(deg + 1):
+                for b in range(a, deg + 1):
+                    prod_index[(a, b)] = n_wit + n_prod
+                    n_prod += 1
+            n_wit += n_prod
+        # n = next power of 2.
         n = 1
         while n < n_wit:
             n *= 2
@@ -1530,6 +1564,8 @@ class Circuit:
         self._cheb_diffeq = diffeq
         self._cheb_order = order
         self._cheb_ics = ics
+        self._cheb_prod_index = prod_index
+        self._cheb_has_nonlinear = has_nonlinear
 
         # --- Helper: Chebyshev differentiation matrix (Fractions) ---
         # D maps [a_0..a_N] -> [b_0..b_N] where y'=Σ b_n T_n.
@@ -1592,7 +1628,7 @@ class Circuit:
 
         # Precompute x^ex for all ex in diffeq
         x_pow_cache = {}
-        for (ex, ord_) in diffeq.keys():
+        for (ex, ords) in diffeq.keys():
             if ex not in x_pow_cache:
                 x_pow_cache[ex] = x_pow_cheb(ex)
 
@@ -1605,21 +1641,22 @@ class Circuit:
             return (fr.numerator * pow(fr.denominator, N - 2, N)) % N
 
         # --- Residual coefficients r_k for k = 0..deg-order ---
-        # R(x) = Σ_{(ex,ord),coeff} coeff * x^ex * y^(ord) + pure x terms
-        # y^(ord) = Σ_n d_n T_n where d = D^ord · c
-        # x^ex = Σ_j px_j T_j
-        # Product: Σ_{j,n} px_j d_n (T_{|j-n|} + T_{j+n})/2
+        # R(x) = Σ_{(ex,ords),coeff} coeff * x^ex * Π_{o∈ords} y^(o)
+        # For linear (len(ords)==1): y^(o) = Σ_n d_n T_n, d = D^o · c.
+        # For quadratic (len(ords)==2): y^(o1)*y^(o2) = Σ_{m,n} ...
+        #   computed via product wires p_{a,b} = c_a * c_b.
         for k in range(deg - order + 1):
             acc = {}
             const = Fraction(0)
-            for (ex, ord_), coeff in diffeq.items():
-                if ord_ == -1:
+            for (ex, ords), coeff in diffeq.items():
+                if len(ords) == 0:
                     # Pure x term: coeff * x^ex
                     px = x_pow_cache[ex]
                     if k < len(px):
                         const += coeff * px[k]
-                else:
+                elif len(ords) == 1:
                     # coeff * x^ex * y^(ord)
+                    ord_ = ords[0]
                     px = x_pow_cache[ex]
                     Dp = Dpows[ord_]  # d_n = Σ_m Dp[n][m] c_m
                     # Product coefficient for T_k:
@@ -1647,6 +1684,64 @@ class Circuit:
                                         gate("L", m,
                                              (_field(coeff * contrib * Dp[nn][m])) % N,
                                              acc)
+                elif len(ords) == 2:
+                    # coeff * x^ex * y^(o1) * y^(o2)
+                    # y^(o1) = Σ_m (A·c)_m T_m, y^(o2) = Σ_n (B·c)_n T_n
+                    # (A·c)_m (B·c)_n = Σ_{a≤b} C_{m,n,a,b} * p_{a,b}
+                    # where p_{a,b} = c_a * c_b (product wire).
+                    o1, o2 = ords[0], ords[1]
+                    A = Dpows[o1]
+                    B = Dpows[o2]
+                    px = x_pow_cache[ex]
+                    # For each (a,b) with a<=b, compute its total
+                    # contribution to r_k via the double convolution.
+                    for a in range(deg + 1):
+                        for b in range(a, deg + 1):
+                            p_idx = prod_index[(a, b)]
+                            # Compute W_t = Σ_{m,n} C_{m,n,a,b} *
+                            #             ([t==|m-n|]+[t==m+n])/2
+                            # for t=0..2*deg, then convolve with px.
+                            total = Fraction(0)
+                            # t ranges 0..2*deg (max degree of product)
+                            for t in range(2 * deg + 1):
+                                Wt = Fraction(0)
+                                for m in range(deg + 1):
+                                    for n_ in range(deg + 1):
+                                        # C_{m,n,a,b}
+                                        if a == b:
+                                            Cab = A[m][a] * B[n_][a]
+                                        else:
+                                            Cab = (A[m][a] * B[n_][b] +
+                                                   A[m][b] * B[n_][a])
+                                        if Cab == 0:
+                                            continue
+                                        # ([t==|m-n|]+[t==m+n])/2
+                                        w = Fraction(0)
+                                        if abs(m - n_) == t:
+                                            w += Fraction(1, 2)
+                                        if m + n_ == t:
+                                            w += Fraction(1, 2)
+                                        Wt += Cab * w
+                                if Wt == 0:
+                                    continue
+                                # Convolve with px: contribution to r_k
+                                # Σ_j px_j * Wt * ([k==|j-t|]+[k==j+t])/2
+                                for j, px_j in enumerate(px):
+                                    if px_j == 0:
+                                        continue
+                                    w2 = Fraction(0)
+                                    if abs(j - t) == k:
+                                        w2 += Fraction(1, 2)
+                                    if j + t == k:
+                                        w2 += Fraction(1, 2)
+                                    total += px_j * Wt * w2
+                            if total != 0:
+                                # r_k += coeff * total * p_{a,b}
+                                # p_{a,b} is in aO[p_idx], use "O" gate
+                                gate("O", p_idx,
+                                     (_field(coeff * total)) % N, acc)
+                else:
+                    raise ValueError("only up to quadratic supported")
             cons.append((acc, _field(-const) % N))
 
         # --- Side conditions ---
@@ -1683,7 +1778,7 @@ class Circuit:
         self._densify(cons, n)
         # Symbolic canonical (no numeric values in equation part).
         # Format: cheb(<diffeq>=0,<ics>,deg=<deg>)
-        def _term_str(ex, ord_, coeff):
+        def _term_str(ex, ords, coeff):
             cs = (str(coeff.numerator) if coeff.denominator == 1
                   else "%d/%d" % (coeff.numerator, coeff.denominator))
             parts = []
@@ -1695,21 +1790,23 @@ class Circuit:
                 parts.append("x")
             elif ex > 1:
                 parts.append("x^%d" % ex)
-            if ord_ == -1:
+            if len(ords) == 0:
                 pass
-            elif ord_ == 0:
-                parts.append("y")
-            elif ord_ == 1:
-                parts.append("y'")
             else:
-                parts.append("y" + "'" * ord_)
+                for ord_ in ords:
+                    if ord_ == 0:
+                        parts.append("y")
+                    elif ord_ == 1:
+                        parts.append("y'")
+                    else:
+                        parts.append("y" + "'" * ord_)
             s = "*".join(parts)
             if s == "" or s == "-":
                 s = cs
             return s
         terms = []
-        for (ex, ord_) in sorted(diffeq.keys()):
-            terms.append(_term_str(ex, ord_, diffeq[(ex, ord_)]))
+        for (ex, ords) in sorted(diffeq.keys()):
+            terms.append(_term_str(ex, ords, diffeq[(ex, ords)]))
         diffeq_str = "+".join(terms).replace("+-", "-")
         ics_parts = []
         for (ord_, x0) in sorted(ics.keys()):
@@ -1901,9 +1998,21 @@ class Circuit:
             return aL, aR, aO
         if self.mode == "cheb":
             # Chebyshev: witness is [c_0..c_N] as field elements.
-            # All constraints are linear; aR/aO are zero.
+            # Linear constraints use aL; product wires (if nonlinear)
+            # use Hadamard: aL[p]*aR[p] = aO[p].
             for j, w in enumerate(X):
                 aL[j] = w % N
+            if getattr(self, '_cheb_has_nonlinear', False):
+                prod_index = self._cheb_prod_index
+                # For each product p_{a,b} = c_a * c_b at wire p_idx:
+                # set aL[p_idx] = c_a, aR[p_idx] = c_b,
+                # aO[p_idx] = c_a * c_b (Hadamard verifies).
+                for (a, b), p_idx in prod_index.items():
+                    ca = aL[a]
+                    cb = aL[b]
+                    aL[p_idx] = ca
+                    aR[p_idx] = cb
+                    aO[p_idx] = (ca * cb) % N
             return aL, aR, aO
         if self.mode == "exact":
             if hasattr(self, '_exact_poly_c'):
@@ -2007,11 +2116,13 @@ class Circuit:
             for k in range(d - order + 1):
                 lhs = 0
                 const = 0
-                for (ex, ord_), coeff in diffeq.items():
-                    if ord_ == -1:
+                for (ex, ords), coeff in diffeq.items():
+                    if len(ords) == 0:
                         if ex == k:
                             const = (const + _field(coeff)) % N
                     else:
+                        # Taylor mode: only linear (nonlinear rejected earlier)
+                        ord_ = ords[0]
                         i = k - ex
                         if 0 <= i <= d - ord_:
                             c_idx = i + ord_
