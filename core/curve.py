@@ -231,8 +231,21 @@ def Hvec(i):
 def batch_mul(scalars, points):
     """Batched scalar-point multiplication: [s_i * P_i].
 
-    Python fallback: loops over mul(). For performance, this should be
-    implemented in the C extension as a single FFI call.
-    TODO: Add to curve_ext.c as batch_mul(scalars, points).
+    Tries C extension first (single FFI call); falls back to Python loop.
+    TODO: C implementation is in curve_ext.c (meth_batch_mul).
     """
+    # Try C extension if available
+    try:
+        from .cext import curve_ext as _c
+        if hasattr(_c, 'batch_mul'):
+            return _c.batch_mul(scalars, points)
+    except ImportError:
+        pass
+    try:
+        import curve_ext as _c2
+        if hasattr(_c2, 'batch_mul'):
+            return _c2.batch_mul(scalars, points)
+    except ImportError:
+        pass
+    # Fallback: Python loop
     return [mul(s, P) for s, P in zip(scalars, points)]

@@ -33,12 +33,37 @@ def _dot(a, b):
 
 def _fold_gens(gens, x, x_inv, n2):
     """g'_i = x^{-1}*g_i + x*g_{i+n'}   (paper Protocol 1, step 23)"""
+    # Try C batch_fold first (single FFI)
+    try:
+        from .cext import curve_ext as _c
+        if hasattr(_c, 'batch_fold'):
+            return _c.batch_fold(gens, x, x_inv, n2, 0)
+    except ImportError:
+        pass
+    try:
+        import curve_ext as _c2
+        if hasattr(_c2, 'batch_fold'):
+            return _c2.batch_fold(gens, x, x_inv, n2, 0)
+    except ImportError:
+        pass
     return [curve.add(curve.mul(x_inv, gens[i]), curve.mul(x, gens[n2 + i]))
             for i in range(n2)]
 
 
 def _fold_gens_h(gens, x, x_inv, n2):
     """h'_i = x*h_i + x^{-1}*h_{i+n'}   (paper Protocol 1, step 25)"""
+    try:
+        from .cext import curve_ext as _c
+        if hasattr(_c, 'batch_fold'):
+            return _c.batch_fold(gens, x, x_inv, n2, 1)
+    except ImportError:
+        pass
+    try:
+        import curve_ext as _c2
+        if hasattr(_c2, 'batch_fold'):
+            return _c2.batch_fold(gens, x, x_inv, n2, 1)
+    except ImportError:
+        pass
     return [curve.add(curve.mul(x, gens[i]), curve.mul(x_inv, gens[n2 + i]))
             for i in range(n2)]
 
