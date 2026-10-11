@@ -181,8 +181,9 @@ def _check_precision(eq_str, w_frac, k):
 
 
 def _parse_pde2d_string(eq_str):
-    """Parse 'pde2d(u_xx + u_yy = <f>, deg = N)'.
-    Returns (f_str, deg) or None if not a pde2d equation.
+    """Parse 'pde2d(u_xx + u_yy = <f>, deg = N)' or
+    'pde2d(u_xx + u_yy + u^2 = <f>, deg = N)' (nonlinear).
+    Returns (f_str, deg, has_nonlinear) or None if not a pde2d equation.
     """
     import re
     s = eq_str.strip()
@@ -197,17 +198,23 @@ def _parse_pde2d_string(eq_str):
         return None
     deg = int(m.group(1))
     lhs_rhs = inner[:m.start()].strip()
-    # lhs_rhs should be "u_xx + u_yy = <f>"
+    # lhs_rhs should be "u_xx + u_yy = <f>" or "u_xx + u_yy + u^2 = <f>"
     if "=" not in lhs_rhs:
         return None
     lhs, rhs = lhs_rhs.split("=", 1)
     lhs = lhs.strip().replace(" ", "")
-    if lhs not in ("u_xx+u_yy", "u_yy+u_xx"):
+    has_nonlinear = False
+    if lhs in ("u_xx+u_yy", "u_yy+u_xx"):
+        pass
+    elif lhs in ("u_xx+u_yy+u^2", "u_yy+u_xx+u^2", "u_xx+u^2+u_yy",
+                 "u^2+u_xx+u_yy", "u^2+u_yy+u_xx", "u_yy+u^2+u_xx"):
+        has_nonlinear = True
+    else:
         return None
     f_str = rhs.strip()
     if not f_str:
         return None
-    return (f_str, deg)
+    return (f_str, deg, has_nonlinear)
 
 
 def prove_equation(eq_str, witness, precision):
@@ -229,7 +236,10 @@ def prove_equation(eq_str, witness, precision):
     # k is meaningless (precision is deg); witness is auto-computed.
     pde_parsed = _parse_pde2d_string(eq_str)
     if pde_parsed is not None:
-        f_str, deg = pde_parsed
+        f_str, deg, has_nl = pde_parsed
+        if has_nl:
+            # Nonlinear PDE: use fixed-point residual proof
+            return pde2d_nl_fp_prove(eq_str, S=10**6, eps=Fraction(1, 10**5))
         # Parse f_str to {(ex, ey): Fraction} for the spec
         # (Use the same logic as pde2d_poisson_coefficients)
         import re
@@ -1162,6 +1172,9 @@ def verify_equation(eq_str, proof, precision):
     # 2D PDE: pde2d(...)
     pde_parsed = _parse_pde2d_string(eq_str)
     if pde_parsed is not None:
+        # Check for nonlinear FP proof
+        if isinstance(proof, dict) and "pde_fp_spec" in proof:
+            return _verify_pde_nl_fp(eq_str, proof)
         try:
             if not isinstance(proof, dict):
                 return False
@@ -1528,3 +1541,323 @@ def pde2d_poisson_coefficients(f_str, deg):
         for n in range(N + 1):
             c[m][n] = c_flat[idx(m, n)]
     return c
+
+
+def pde2d_nl_fp_prove(eq_str, S=10**6, eps=None):
+    """Fixed-point residual bound proof for nonlinear 2D PDE.
+
+    Proves: I know integers z_{m,n} such that |F_{m,n}(z/S)| <= eps
+    for all tau residuals of u_xx + u_yy + u^2 = f.
+
+    Args:
+        eq_str: e.g. 'pde2d(u_xx + u_yy + u^2 = 2, deg = 3)'
+        S: fixed-point scale (default 10^6)
+        eps: tolerance (Fraction or float, default 1e-5)
+    """
+    from fractions import Fraction as Fr
+    from core.api_pde_nl import pde2d_nl_coefficients
+    if eps is None:
+        eps = Fr(1, 10**5)
+    elif not isinstance(eps, Fr):
+        eps = Fr(eps).limit_denominator(10**12)
+    parsed = _parse_pde2d_string(eq_str)
+    if parsed is None:
+        raise ValueError("not a pde2d equation")
+    f_str, deg, has_nl = parsed
+    if not has_nl:
+        raise ValueError("not a nonlinear PDE")
+    N = deg
+    # Parse f_str
+    import re
+    f = {}
+    s = f_str.replace(" ", "").replace("-", "+-")
+    for term in [t for t in s.split("+") if t]:
+        sign = Fr(1)
+        if term.startswith("-"):
+            sign = Fr(-1)
+            term = term[1:]
+        if not term:
+            continue
+        coeff = Fr(1)
+        ex, ey = 0, 0
+        for fac in term.split("*"):
+            if not fac:
+                continue
+            m = re.match(r'^x\^(\d+)$', fac)
+            if m:
+                ex = int(m.group(1))
+                continue
+            m = re.match(r'^y\^(\d+)$', fac)
+            if m:
+                ey = int(m.group(1))
+                continue
+            if fac == "x":
+                ex = 1
+                continue
+            if fac == "y":
+                ey = 1
+                continue
+            if "/" in fac:
+                num, den = fac.split("/")
+                coeff *= Fr(int(num), int(den))
+            elif "." in fac:
+                coeff *= Fr(fac)
+            else:
+                coeff *= Fr(int(fac))
+        f[(ex, ey)] = f.get((ex, ey), Fr(0)) + sign * coeff
+    f = {k: v for k, v in f.items() if v != 0}
+    spec = {'f': f, 'deg': N, 'nonlinear': True}
+    # Solve via float Newton
+    c_2d = pde2d_nl_coefficients(f_str, N)
+    # Quantize
+    z = []
+    for m in range(N + 1):
+        for n_ in range(N + 1):
+            z.append(int(math.floor(c_2d[m][n_] * S + 0.5)))
+    # Build circuit
+    circ = circuit_mod.Circuit(
+        eq_str, {0: (0, 0)}, "1", False, False,
+        pde_fp_params=(spec, S, eps))
+    # Compute residuals and bits
+    # We need to recompute R_i as in _build_pde_fp
+    # For simplicity, use the circuit's check via evaluate
+    # First, compute R_i values to get bits
+    # (Duplicate the residual computation from _build_pde_fp)
+    from math import gcd
+    # Get D, B, m_bits from circuit
+    D = circ._pde_fp_D
+    B = circ._pde_fp_B
+    m_bits = circ._pde_fp_m
+    M = circ._pde_fp_M
+    n_tau = circ._pde_fp_n_tau
+    # Recompute residuals to verify bounds and get bits
+    # Build the Fraction constraints again (simplified)
+    # For the prototype, we'll compute R_i by evaluating the
+    # linear constraints with z and products
+    # Actually, easiest: construct X with dummy bits, evaluate,
+    # check constraints to find violations, then compute proper bits.
+    # But we need bits to evaluate...
+    # Let's compute R_i directly:
+    def idx(m, n_):
+        return m * (N + 1) + n_
+    # Chebyshev D2 (float for residual check, but we need exact int)
+    # We'll use the circuit's constraint matrices directly.
+    # The circuit has WL, WO, c. For each constraint i:
+    #   R_i + D*S^2*const = Σ WL*z + Σ WO*p
+    # We need to extract const. Instead, let's just compute
+    # the residual via the definition and verify with circuit.
+    # For bits: we need S_i = R_i - D*S^2*const, with |S_i| <= B.
+    # Let's compute S_i by mimicking _build_pde_fp logic.
+    # (This duplicates code but is correct for the prototype.)
+    #
+    # Simpler: use the fact that check_constraints will verify.
+    # We'll compute bits by trying to satisfy the constraints.
+    # Actually, we MUST compute S_i correctly.
+    #
+    # Let's do it properly: rebuild the residual computation.
+    from fractions import Fraction as Fr2
+    # D2 matrices (Fractions)
+    def cheb_diff_mat(K):
+        D = [[Fr2(0)] * (K + 1) for _ in range(K + 1)]
+        if K >= 1:
+            D[K - 1][K] = Fr2(2 * K)
+        for nn in range(K - 2, -1, -1):
+            cbar = Fr2(2) if nn == 0 else Fr2(1)
+            for col in range(K + 1):
+                D[nn][col] += D[nn + 2][col] / cbar
+            D[nn][nn + 1] += Fr2(2 * (nn + 1)) / cbar
+        return D
+    D1 = cheb_diff_mat(N)
+    D2m = [[Fr2(0)] * (N + 1) for _ in range(N + 1)]
+    for i in range(N + 1):
+        for j in range(N + 1):
+            s = Fr2(0)
+            for k in range(N + 1):
+                s += D1[i][k] * D1[k][j]
+            D2m[i][j] = s
+    # f_cheb (Fractions)
+    def x_pow_cheb(ex):
+        if ex == 0:
+            return [Fr2(1)]
+        p = [Fr2(1)]
+        for _ in range(ex):
+            q = [Fr2(0)] * (len(p) + 1)
+            for k, pk in enumerate(p):
+                if pk == 0:
+                    continue
+                q[abs(1 - k)] += pk / 2
+                q[k + 1] += pk / 2
+            p = q
+        return p
+    f_cheb = [[Fr2(0)] * (N + 1) for _ in range(N + 1)]
+    for (ex, ey), coeff in f.items():
+        px = x_pow_cheb(ex)
+        py = x_pow_cheb(ey)
+        for m in range(min(len(px), N + 1)):
+            for n_ in range(min(len(py), N + 1)):
+                f_cheb[m][n_] += coeff * px[m] * py[n_]
+    # Compute S_i for each constraint
+    S_vals = []
+    # Tau constraints
+    for m in range(N - 1):
+        for n_ in range(N - 1):
+            # R = Σ_L (D*S*A)*z + Σ_O (D*K)*p
+            R = 0
+            # Linear: u_xx + u_yy
+            for a in range(N + 1):
+                if D2m[m][a] != 0:
+                    R += int(D * S * D2m[m][a]) * z[idx(a, n_)]
+            for b in range(N + 1):
+                if D2m[n_][b] != 0:
+                    R += int(D * S * D2m[n_][b]) * z[idx(m, b)]
+            # Quadratic: u^2
+            for a in range(N + 1):
+                for b in range(N + 1):
+                    ia = idx(a, b)
+                    for c_ in range(N + 1):
+                        for d in range(N + 1):
+                            ib = idx(c_, d)
+                            if ia > ib:
+                                continue
+                            kx = Fr2(0)
+                            if abs(a - c_) == m:
+                                kx += Fr2(1, 2)
+                            if a + c_ == m:
+                                kx += Fr2(1, 2)
+                            if kx == 0:
+                                continue
+                            ky = Fr2(0)
+                            if abs(b - d) == n_:
+                                ky += Fr2(1, 2)
+                            if b + d == n_:
+                                ky += Fr2(1, 2)
+                            if ky == 0:
+                                continue
+                            K = kx * ky
+                            mult = 2 if ia != ib else 1
+                            R += int(D * K * mult) * z[ia] * z[ib]
+            # S_i = R - D*S^2*f_cheb[m][n]
+            S_i = R - int(D * (S ** 2) * f_cheb[m][n_])
+            S_vals.append(S_i)
+            if abs(S_i) > B:
+                raise ValueError(
+                    "PDE residual (%d,%d) exceeds bound: |%d| > %d" %
+                    (m, n_, S_i, B))
+    # BCs (linear, no u^2)
+    # Left/right: for n_=0..N
+    for n_ in range(N + 1):
+        R = sum(int(D * S * (Fr2(-1) ** mm)) * z[idx(mm, n_)]
+                for mm in range(N + 1))
+        S_i = R  # const=0
+        S_vals.append(S_i)
+        if abs(S_i) > B:
+            raise ValueError("BC residual exceeds bound")
+    for n_ in range(N + 1):
+        R = sum(int(D * S * Fr2(1)) * z[idx(mm, n_)]
+                for mm in range(N + 1))
+        S_vals.append(R)
+        if abs(R) > B:
+            raise ValueError("BC residual exceeds bound")
+    for mm in range(1, N):
+        R = sum(int(D * S * (Fr2(-1) ** n_)) * z[idx(mm, n_)]
+                for n_ in range(N + 1))
+        S_vals.append(R)
+        if abs(R) > B:
+            raise ValueError("BC residual exceeds bound")
+    for mm in range(1, N):
+        R = sum(int(D * S * Fr2(1)) * z[idx(mm, n_)]
+                for n_ in range(N + 1))
+        S_vals.append(R)
+        if abs(R) > B:
+            raise ValueError("BC residual exceeds bound")
+    # Bits
+    bits = []
+    for S_i in S_vals:
+        u = S_i + B
+        for t in range(m_bits):
+            bits.append((u >> t) & 1)
+    X = z + bits
+    aL, aR, aO = circ.evaluate(X)
+    if not circ.check_constraints(aL, aR, aO):
+        raise ValueError("PDE FP circuit constraints not satisfied (bug)")
+    proof = bulletproof.prove(circ, aL, aR, aO)
+    proof["equation"] = circ.canonical
+    proof["precision"] = ""
+    proof["pde_fp_spec"] = {
+        'f': [((ex, ey), str(coeff)) for (ex, ey), coeff in f.items()],
+        'deg': N,
+        'S': S,
+        'eps': str(eps),
+    }
+    return proof
+
+
+def _verify_pde_nl_fp(eq_str, proof):
+    """Verify a nonlinear PDE fixed-point proof."""
+    from fractions import Fraction as Fr
+    try:
+        if not isinstance(proof, dict):
+            return False
+        if "pde_fp_spec" not in proof:
+            return False
+        fps = proof["pde_fp_spec"]
+        parsed = _parse_pde2d_string(eq_str)
+        if parsed is None:
+            return False
+        f_str, deg, has_nl = parsed
+        if not has_nl:
+            return False
+        # Reconstruct f from proof
+        proof_f = {(ex, ey): Fr(coeff_str) for (ex, ey), coeff_str in fps['f']}
+        # Parse f_str and compare
+        import re
+        f = {}
+        s = f_str.replace(" ", "").replace("-", "+-")
+        for term in [t for t in s.split("+") if t]:
+            sign = Fr(1)
+            if term.startswith("-"):
+                sign = Fr(-1)
+                term = term[1:]
+            if not term:
+                continue
+            coeff = Fr(1)
+            ex, ey = 0, 0
+            for fac in term.split("*"):
+                if not fac:
+                    continue
+                m = re.match(r'^x\^(\d+)$', fac)
+                if m:
+                    ex = int(m.group(1))
+                    continue
+                m = re.match(r'^y\^(\d+)$', fac)
+                if m:
+                    ey = int(m.group(1))
+                    continue
+                if fac == "x":
+                    ex = 1
+                    continue
+                if fac == "y":
+                    ey = 1
+                    continue
+                if "/" in fac:
+                    num, den = fac.split("/")
+                    coeff *= Fr(int(num), int(den))
+                elif "." in fac:
+                    coeff *= Fr(fac)
+                else:
+                    coeff *= Fr(int(fac))
+            f[(ex, ey)] = f.get((ex, ey), Fr(0)) + sign * coeff
+        f = {k: v for k, v in f.items() if v != 0}
+        if proof_f != f or fps['deg'] != deg:
+            return False
+        S = fps['S']
+        eps = Fr(fps['eps'])
+        spec = {'f': f, 'deg': deg, 'nonlinear': True}
+        circ = circuit_mod.Circuit(
+            eq_str, {0: (0, 0)}, "1", False, False,
+            pde_fp_params=(spec, S, eps))
+        if proof.get("equation") != circ.canonical:
+            return False
+        return bulletproof.verify(circ, proof)
+    except (ValueError, KeyError, TypeError, AssertionError):
+        return False

@@ -1056,7 +1056,8 @@ class Circuit:
 
     def __init__(self, eq_str, poly, precision, trans_used, float_seen,
                  force_complex=False, integral_spec=None, ode_spec=None,
-                 cheb_spec=None, pde_spec=None, cheb_fp_params=None):
+                 cheb_spec=None, pde_spec=None, cheb_fp_params=None,
+                 pde_fp_params=None):
         self.eq_str = eq_str
         # Precision k is MANDATORY for every equation (parsed first).
         self.precision = _parse_precision(precision)
@@ -1065,6 +1066,7 @@ class Circuit:
         self.cheb_spec = cheb_spec
         self.pde_spec = pde_spec
         self.cheb_fp_params = cheb_fp_params
+        self.pde_fp_params = pde_fp_params
         # Integral equations: FTC mode (bypass exact/tolerance selection).
         # The poly is {1: (±1,0), 0: (0,0)} (placeholder); FTC uses the
         # spec directly.
@@ -1109,6 +1111,15 @@ class Circuit:
             spec_fp, S_fp, eps_fp = cheb_fp_params
             self._build_cheb_fp(spec_fp, S_fp, eps_fp)
             self.canonical = self._cheb_fp_canon  # no ;k=
+            return
+        # Fixed-point nonlinear PDE: pde_fp mode.
+        # pde_fp_params = (spec, S, eps)
+        if pde_fp_params is not None:
+            self.is_complex = False
+            self.mode = "pde_fp"
+            spec_fp, S_fp, eps_fp = pde_fp_params
+            self._build_pde_fp(spec_fp, S_fp, eps_fp)
+            self.canonical = self._pde_fp_canon  # no ;k=
             return
         # Normalize overall sign so that "38 = x^3+2*x+5" and
         # "x^3+2*x+5 = 38" compile to the identical circuit and
@@ -2205,6 +2216,270 @@ class Circuit:
         self._pde_canon = "pde2d(u_xx+u_yy=%s,deg=%d)" % (f_str, N)
         self._pde_spec_for_proof = spec
 
+    def _build_pde_fp(self, spec, S, eps):
+        """Fixed-point residual bound for nonlinear 2D PDE.
+
+        Solves u_xx + u_yy + u^2 = f(x,y) with zero Dirichlet BCs.
+        Proves: I know integers z_{m,n} such that |F_{m,n}(z/S)| <= eps
+        for all tau residuals.
+
+        Spec: {'f': {(ex, ey): Fraction}, 'deg': N, 'nonlinear': True}
+
+        Witness: z_{m,n} flattened, idx = m*(N+1)+n, in aL.
+        Products p_{(a,b),(c,d)} = z_{a,b}*z_{c,d} in aO via Hadamard.
+        Bits for range proofs in aL (with aR=1-bit, aO=0).
+
+        Scaled residual: R = D*S^2*F(z/S), |R| <= B = D*S^2*eps.
+        """
+        from fractions import Fraction as Fr
+        f = spec['f']
+        N = spec['deg']
+        if N % 2 == 0:
+            raise ValueError("pde2d requires odd deg")
+        if not isinstance(eps, Fr):
+            eps = Fr(eps).limit_denominator(10**12)
+
+        def idx(m, n_):
+            return m * (N + 1) + n_
+
+        # Chebyshev D2 (same as _build_pde)
+        def cheb_diff_mat(K):
+            D = [[Fr(0)] * (K + 1) for _ in range(K + 1)]
+            if K >= 1:
+                D[K - 1][K] = Fr(2 * K)
+            for nn in range(K - 2, -1, -1):
+                cbar = Fr(2) if nn == 0 else Fr(1)
+                for col in range(K + 1):
+                    D[nn][col] += D[nn + 2][col] / cbar
+                D[nn][nn + 1] += Fr(2 * (nn + 1)) / cbar
+            return D
+        D1 = cheb_diff_mat(N)
+        D2 = [[Fr(0)] * (N + 1) for _ in range(N + 1)]
+        for i in range(N + 1):
+            for j in range(N + 1):
+                s = Fr(0)
+                for k in range(N + 1):
+                    s += D1[i][k] * D1[k][j]
+                D2[i][j] = s
+
+        # f in Chebyshev basis
+        def x_pow_cheb(ex):
+            if ex == 0:
+                return [Fr(1)]
+            p = [Fr(1)]
+            for _ in range(ex):
+                q = [Fr(0)] * (len(p) + 1)
+                for k, pk in enumerate(p):
+                    if pk == 0:
+                        continue
+                    q[abs(1 - k)] += pk / 2
+                    q[k + 1] += pk / 2
+                p = q
+            return p
+        f_cheb = [[Fr(0)] * (N + 1) for _ in range(N + 1)]
+        for (ex, ey), coeff in f.items():
+            px = x_pow_cheb(ex)
+            py = x_pow_cheb(ey)
+            for m in range(min(len(px), N + 1)):
+                for n_ in range(min(len(py), N + 1)):
+                    f_cheb[m][n_] += coeff * px[m] * py[n_]
+
+        # Build Fraction constraints: list of (acc, const) with
+        # acc = {(which, idx): Fr}, equation Σ acc*wire = const
+        cons_frac = []
+        # Tau: (u_xx + u_yy + u^2 - f)_{m,n} = 0 for m,n=0..N-2
+        # We'll store as: Σ_lin A*z + Σ_quad B*p = const
+        # For now, collect linear part; quadratic added via products
+        for m in range(N - 1):
+            for n_ in range(N - 1):
+                acc = {}
+                # u_xx + u_yy (linear)
+                for a in range(N + 1):
+                    if D2[m][a] != 0:
+                        acc[("L", idx(a, n_))] = acc.get(("L", idx(a, n_)), Fr(0)) + D2[m][a]
+                for b in range(N + 1):
+                    if D2[n_][b] != 0:
+                        k = ("L", idx(m, b))
+                        acc[k] = acc.get(k, Fr(0)) + D2[n_][b]
+                # u^2 term: (u^2)_{m,n} = Σ_{a,b,c,d} K * c_{a,b}*c_{c,d}
+                # K from Chebyshev product: T_a*T_c -> T_m, T_b*T_d -> T_n
+                # We'll add these as ("O", p_idx) entries later, after
+                # allocating product wires. For now, store symbolic.
+                # Mark that this constraint has nonlinear part.
+                const = f_cheb[m][n_]
+                cons_frac.append((acc, const, (m, n_)))  # (m,n) for u^2
+        # BCs (linear, no u^2)
+        for n_ in range(N + 1):
+            acc = {}
+            for mm in range(N + 1):
+                acc[("L", idx(mm, n_))] = Fr(-1) ** mm
+            cons_frac.append((acc, Fr(0), None))
+        for n_ in range(N + 1):
+            acc = {}
+            for mm in range(N + 1):
+                acc[("L", idx(mm, n_))] = Fr(1)
+            cons_frac.append((acc, Fr(0), None))
+        for mm in range(1, N):
+            acc = {}
+            for n_ in range(N + 1):
+                acc[("L", idx(mm, n_))] = Fr(-1) ** n_
+            cons_frac.append((acc, Fr(0), None))
+        for mm in range(1, N):
+            acc = {}
+            for n_ in range(N + 1):
+                acc[("L", idx(mm, n_))] = Fr(1)
+            cons_frac.append((acc, Fr(0), None))
+
+        M = len(cons_frac)
+        # Product wires for u^2: need p_{(a,b),(c,d)} for all (a,b)<=(c,d)
+        # in lex order. Only for tau constraints (first (N-1)^2).
+        n_tau = (N - 1) * (N - 1)
+        prod_index = {}
+        p_next = (N + 1) * (N + 1)
+        for ia in range((N + 1) * (N + 1)):
+            for ib in range(ia, (N + 1) * (N + 1)):
+                # Map flat idx to (m,n)
+                # We'll need all pairs for u^2
+                prod_index[(ia, ib)] = p_next
+                p_next += 1
+        P = len(prod_index)
+        # Compute D (denominator LCM)
+        from math import gcd
+        D = 1
+        for acc, const, _ in cons_frac:
+            D = D * const.denominator // gcd(D, const.denominator)
+            for coeff in acc.values():
+                D = D * coeff.denominator // gcd(D, coeff.denominator)
+        # u^2 coefficients have denominator 4 (from (1/2)*(1/2))
+        D = D * 4 // gcd(D, 4)
+        B_frac = D * (S ** 2) * eps
+        B = (B_frac.numerator + B_frac.denominator - 1) // B_frac.denominator
+        m_bits = (2 * B).bit_length()
+        if m_bits == 0:
+            m_bits = 1
+        # Wire layout
+        n_z = (N + 1) * (N + 1)
+        bit0 = n_z + P
+        n_wires = bit0 + M * m_bits
+        n = 1
+        while n < n_wires:
+            n *= 2
+        self.n = n
+        self._pde_fp_deg = N
+        self._pde_fp_S = S
+        self._pde_fp_B = B
+        self._pde_fp_D = D
+        self._pde_fp_m = m_bits
+        self._pde_fp_M = M
+        self._pde_fp_prod_index = prod_index
+        self._pde_fp_bit0 = bit0
+        self._pde_fp_n_tau = n_tau
+        self.mode = "pde_fp"
+        self.is_complex = False
+
+        import sys
+        _mod = sys.modules[__name__].N
+        cons = []
+        def gate(which, i, coeff, acc):
+            acc[which, i] = (acc.get((which, i), 0) + coeff) % _mod
+
+        for ci, (acc_frac, const_frac, mn) in enumerate(cons_frac):
+            acc = {}
+            # Linear part: scale by D*S
+            for (which, idx_), coeff in acc_frac.items():
+                if which == "L":
+                    gate("L", idx_, int(D * S * coeff), acc)
+            # Quadratic u^2 part (only for tau constraints)
+            if mn is not None:
+                m_tau, n_tau_ = mn
+                # (u^2)_{m,n} = Σ_{a,b,c,d} K * c_{a,b} * c_{c,d}
+                # K = kx(a,c,m) * ky(b,d,n), where
+                # kx = 1/2 if m==|a-c| or m==a+c (1 if both, i.e., a==0 or c==0)
+                # Actually: T_a*T_c = (T_{|a-c|} + T_{a+c})/2
+                for a in range(N + 1):
+                    for b in range(N + 1):
+                        ia = idx(a, b)
+                        for c in range(N + 1):
+                            for d in range(N + 1):
+                                ib = idx(c, d)
+                                # Order ia <= ib for prod_index
+                                if ia > ib:
+                                    continue
+                                # Compute K
+                                kx = Fr(0)
+                                if abs(a - c) == m_tau:
+                                    kx += Fr(1, 2)
+                                if a + c == m_tau:
+                                    kx += Fr(1, 2)
+                                if kx == 0:
+                                    continue
+                                ky = Fr(0)
+                                if abs(b - d) == n_tau_:
+                                    ky += Fr(1, 2)
+                                if b + d == n_tau_:
+                                    ky += Fr(1, 2)
+                                if ky == 0:
+                                    continue
+                                K = kx * ky
+                                if K == 0:
+                                    continue
+                                p_idx = prod_index[(ia, ib)]
+                                # Scale: u^2 term is (z*z/S^2), so D*K*z*z
+                                # If ia != ib, the product appears twice in
+                                # symmetric sum? No, we iterate ia<=ib and
+                                # the formula already accounts for it via
+                                # the double sum. Actually, for ia<ib, the
+                                # term c_{ia}*c_{ib} appears once in the
+                                # sum over all (a,b),(c,d). Our iteration
+                                # with ia<=ib covers each unordered pair
+                                # once, which is correct for the symmetric sum.
+                                # But the coefficient needs care: if ia != ib,
+                                # the pair appears twice in the full sum
+                                # (as ((a,b),(c,d)) and ((c,d),(a,b))).
+                                # Since we restrict ia<=ib, we need to double
+                                # when ia != ib.
+                                mult = 2 if ia != ib else 1
+                                gate("O", p_idx, int(D * K * mult), acc)
+            # Bits
+            for t in range(m_bits):
+                gate("L", bit0 + ci * m_bits + t, -(1 << t), acc)
+            # RHS: D*S^2*const - B
+            rhs = int(D * (S ** 2) * const_frac) - B
+            cons.append((acc, rhs % _mod))
+
+        self._densify(cons, n)
+        # Canonical
+        def _fmt_fr(fr):
+            return (str(fr.numerator) if fr.denominator == 1
+                    else "%d/%d" % (fr.numerator, fr.denominator))
+        terms = []
+        for (ex, ey) in sorted(f.keys()):
+            coeff = f[(ex, ey)]
+            cs = _fmt_fr(coeff)
+            parts = []
+            if cs not in ("1", "-1"):
+                parts.append(cs)
+            elif cs == "-1":
+                parts.append("-")
+            if ex == 1:
+                parts.append("x")
+            elif ex > 1:
+                parts.append("x^%d" % ex)
+            if ey == 1:
+                parts.append("y")
+            elif ey > 1:
+                parts.append("y^%d" % ey)
+            s = "*".join(parts)
+            if s == "" or s == "-":
+                s = cs
+            terms.append(s)
+        f_str = "+".join(terms).replace("+-", "-") if terms else "0"
+        eps_str = (_fmt_fr(eps))
+        self._pde_fp_canon = ("pde2d_fp(u_xx+u_yy+u^2=%s,deg=%d,S=%d,eps=%s)" %
+                              (f_str, N, S, eps_str))
+        self.canonical = self._pde_fp_canon
+        self._pde_fp_spec_for_proof = spec
+
     # ---- tolerance mode ----
 
     def _build_tolerance(self, poly, k):
@@ -2406,6 +2681,30 @@ class Circuit:
                 aR[p_idx] = zb
                 aO[p_idx] = (za * zb) % N
             # Bits: X[n_z .. n_z+M*m-1]
+            for i in range(M * m):
+                b = X[n_z + i] % N
+                idx = bit0 + i
+                aL[idx] = b
+                aR[idx] = (1 - b) % N
+                aO[idx] = 0
+            return aL, aR, aO
+        if self.mode == "pde_fp":
+            # Fixed-point nonlinear 2D PDE.
+            # X = [z_0..z_{n_z-1}, bits...], n_z = (N+1)^2
+            Ndeg = self._pde_fp_deg
+            prod_index = self._pde_fp_prod_index
+            bit0 = self._pde_fp_bit0
+            m = self._pde_fp_m
+            M = self._pde_fp_M
+            n_z = (Ndeg + 1) * (Ndeg + 1)
+            for j in range(n_z):
+                aL[j] = X[j] % N
+            for (ia, ib), p_idx in prod_index.items():
+                za = aL[ia]
+                zb = aL[ib]
+                aL[p_idx] = za
+                aR[p_idx] = zb
+                aO[p_idx] = (za * zb) % N
             for i in range(M * m):
                 b = X[n_z + i] % N
                 idx = bit0 + i
