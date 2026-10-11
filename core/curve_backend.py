@@ -75,6 +75,7 @@ class _CABIBackend:
         "wcurve_neg": (None, "P32_P32"),
         "wcurve_is_inf": (ctypes.c_int, "P32_"),
         "wcurve_msm": (None, "P32P32P32L"),
+        "wcurve_msm_vartime": (None, "P32P32P32L"),
         "wcurve_batch_mul": (None, "P32P32P32L"),
         "wcurve_batch_fold": (None, "P32P32P32P32LI"),
         "wcurve_from_affine": (None, "P32_P32P32"),
@@ -176,6 +177,34 @@ class _CABIBackend:
             pbuf[i * 24 + 16] = 1
         r = (ctypes.c_uint32 * 24)()
         self._lib.wcurve_msm(sbuf, pbuf, r, n)
+        return self.to_affine(r)
+
+    def msm_vartime(self, scalars, points):
+        """Variable-time Pippenger MSM. WARNING: NOT constant-time.
+        Only use when scalars are public (e.g., verifier)."""
+        # Fall back to regular msm if vartime not available
+        if not hasattr(self._lib, 'wcurve_msm_vartime'):
+            return self.msm(scalars, points)
+        n = len(scalars)
+        if n != len(points):
+            raise ValueError("length mismatch")
+        if n == 0:
+            return None
+        sbuf = (ctypes.c_uint32 * (8 * n))()
+        pbuf = (ctypes.c_uint32 * (24 * n))()
+        for i, (s, p) in enumerate(zip(scalars, points)):
+            sm = int(s) % N
+            for k in range(8):
+                sbuf[i * 8 + k] = (sm >> (32 * k)) & _MASK32
+            if sm == 0 or p is None:
+                continue
+            x, y = p
+            for k in range(8):
+                pbuf[i * 24 + k] = (int(x) >> (32 * k)) & _MASK32
+                pbuf[i * 24 + 8 + k] = (int(y) >> (32 * k)) & _MASK32
+            pbuf[i * 24 + 16] = 1
+        r = (ctypes.c_uint32 * 24)()
+        self._lib.wcurve_msm_vartime(sbuf, pbuf, r, n)
         return self.to_affine(r)
 
     def batch_mul(self, scalars, points):
@@ -339,7 +368,7 @@ def available_backends():
 def set_backend(name):
     """Switch active backend; returns the backend name actually selected."""
     global BACKEND, USING_C, is_inf, neg, add, dbl, mul, msm, compress, decompress
-    global batch_mul, batch_fold
+    global batch_mul, batch_fold, msm_vartime
     if name not in _BACKENDS:
         raise ValueError("backend '%s' not available (have: %s)"
                          % (name, available_backends()))
@@ -357,6 +386,8 @@ def set_backend(name):
     # batch_* may not exist on all backends; fall back to Python loop
     batch_mul = getattr(mod, 'batch_mul', None) or _py.batch_mul
     batch_fold = getattr(mod, 'batch_fold', None)
+    # vartime: only for public scalars (verify)
+    msm_vartime = getattr(mod, 'msm_vartime', None) or mod.msm
     return BACKEND
 
 

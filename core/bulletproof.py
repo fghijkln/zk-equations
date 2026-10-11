@@ -285,7 +285,9 @@ def verify(circuit, proof):
         # check (b): inner-product argument
         hp = curve.batch_mul(y_neg_n, hvec)
         # Pvef batched as in prove()
-        Pvef = curve.msm(
+        # Use vartime Pippenger: all scalars public (challenges, proof elements)
+        _msm_v = getattr(curve, 'msm_vartime', curve.msm)
+        Pvef = _msm_v(
             [x, xpow[2], xpow[3]] +
             _scale(x, _hadamard(y_neg_n, wR)) +
             [(N - 1)] * n +

@@ -493,6 +493,65 @@ fn gej_msm_pippenger(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
     result
 }
 
+/// Variable-time Pippenger: for verify (public scalars).
+/// WARNING: NOT constant-time. Bucket index leaks via cache timing.
+/// Only use when scalars are public (e.g., verifier challenges).
+fn gej_msm_pippenger_vartime(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
+    const W: usize = 4;
+    const NUM_BUCKETS: usize = 1 << W;
+    const NUM_WINDOWS: usize = 256 / W;
+    
+    let n = scalars.len();
+    if n == 0 {
+        return Gej::zero();
+    }
+    if n < 32 {
+        return gej_msm(scalars, points);
+    }
+    
+    let mut window_sums = Vec::with_capacity(NUM_WINDOWS);
+    
+    for j in 0..NUM_WINDOWS {
+        let mut buckets = vec![Gej::zero(); NUM_BUCKETS];
+        let shift = j * W;
+        let limb_idx = shift >> 5;
+        let bit_idx = shift & 31;
+        
+        for i in 0..n {
+            let c: u32 = if bit_idx + W <= 32 {
+                (scalars[i][limb_idx] >> bit_idx) & 0xF
+            } else {
+                let lo = scalars[i][limb_idx] >> bit_idx;
+                let hi = if limb_idx + 1 < 8 {
+                    scalars[i][limb_idx + 1] << (32 - bit_idx)
+                } else { 0 };
+                (lo | hi) & 0xF
+            };
+            // Variable-time: direct bucket index (fast, but leaks c)
+            if c != 0 {
+                buckets[c as usize] = gej_add(&buckets[c as usize], &points[i]);
+            }
+        }
+        
+        let mut acc = Gej::zero();
+        let mut running = Gej::zero();
+        for k in (1..NUM_BUCKETS).rev() {
+            running = gej_add(&running, &buckets[k]);
+            acc = gej_add(&acc, &running);
+        }
+        window_sums.push(acc);
+    }
+    
+    let mut result = Gej::zero();
+    for j in (0..NUM_WINDOWS).rev() {
+        for _ in 0..W {
+            result = gej_dbl(&result);
+        }
+        result = gej_add(&result, &window_sums[j]);
+    }
+    result
+}
+
 /* ================= FFI boundary =================
  * The only `unsafe` in this crate: copying between raw pointers and owned
  * values. Every exported function reads its inputs into owned locals first,
@@ -745,4 +804,27 @@ pub unsafe extern "C" fn wcurve_batch_fold(
         let gr = gej_add(&r1, &r2);
         write_gej(r.add(i * 24), &gr);
     }
+}
+
+/// Variable-time Pippenger MSM for verify (public scalars only).
+/// WARNING: NOT constant-time. Do not use with secret scalars.
+#[no_mangle]
+pub unsafe extern "C" fn wcurve_msm_vartime(
+    scalars: *const u32,
+    points: *const u32,
+    r: *mut u32,
+    n: usize,
+) {
+    if n == 0 {
+        write_gej(r, &Gej::zero());
+        return;
+    }
+    let mut sc: Vec<[u32; 8]> = Vec::with_capacity(n);
+    let mut pt: Vec<Gej> = Vec::with_capacity(n);
+    for i in 0..n {
+        sc.push(read_fe(scalars.add(i * 8)));
+        pt.push(read_gej(points.add(i * 24)));
+    }
+    let gr = gej_msm_pippenger_vartime(&sc, &pt);
+    write_gej(r, &gr);
 }
