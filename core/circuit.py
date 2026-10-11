@@ -1056,7 +1056,7 @@ class Circuit:
 
     def __init__(self, eq_str, poly, precision, trans_used, float_seen,
                  force_complex=False, integral_spec=None, ode_spec=None,
-                 cheb_spec=None, pde_spec=None):
+                 cheb_spec=None, pde_spec=None, cheb_fp_params=None):
         self.eq_str = eq_str
         # Precision k is MANDATORY for every equation (parsed first).
         self.precision = _parse_precision(precision)
@@ -1064,6 +1064,7 @@ class Circuit:
         self.ode_spec = ode_spec
         self.cheb_spec = cheb_spec
         self.pde_spec = pde_spec
+        self.cheb_fp_params = cheb_fp_params
         # Integral equations: FTC mode (bypass exact/tolerance selection).
         # The poly is {1: (±1,0), 0: (0,0)} (placeholder); FTC uses the
         # spec directly.
@@ -1099,6 +1100,15 @@ class Circuit:
             self.mode = "pde"
             self._build_pde(pde_spec)
             self.canonical = self._pde_canon  # no ;k=
+            return
+        # Fixed-point nonlinear Chebyshev: cheb_fp mode.
+        # cheb_fp_params = (spec, S, eps)
+        if cheb_fp_params is not None:
+            self.is_complex = False
+            self.mode = "cheb_fp"
+            spec_fp, S_fp, eps_fp = cheb_fp_params
+            self._build_cheb_fp(spec_fp, S_fp, eps_fp)
+            self.canonical = self._cheb_fp_canon  # no ;k=
             return
         # Normalize overall sign so that "38 = x^3+2*x+5" and
         # "x^3+2*x+5 = 38" compile to the identical circuit and
@@ -1515,7 +1525,7 @@ class Circuit:
         ics_str = ",".join(ics_parts)
         self._ode_canon = "ode(%s=0,%s,deg=%d)" % (diffeq_str, ics_str, d)
 
-    def _build_cheb(self, spec):
+    def _build_cheb(self, spec, _frac_mode=False):
         """Chebyshev tau method on [-1, 1].
 
         Spec: diffeq {(ex, ords): coeff} (ords=() for pure x, ords=(o,)
@@ -1543,6 +1553,11 @@ class Circuit:
 
         All arithmetic exact (Fractions). Linear terms: zero multiplication
         gates. Quadratic terms: O(N^2) multiplication gates.
+
+        If _frac_mode=True, returns (cons_frac, prod_index, deg, n_wit,
+        has_nonlinear) where cons_frac = [(acc, const)] with acc =
+        {(which, idx): Fraction} and const = Fraction, instead of building
+        the circuit. For use by _build_cheb_fp.
         """
         diffeq = spec['diffeq']
         order = spec['order']
@@ -1644,10 +1659,18 @@ class Circuit:
         cons = []
 
         def gate(which, i, coeff, acc):
-            acc[which, i] = (acc.get((which, i), 0) + coeff) % N
+            if _frac_mode:
+                # Accumulate Fractions (no mod)
+                acc[which, i] = acc.get((which, i), Fraction(0)) + coeff
+            else:
+                acc[which, i] = (acc.get((which, i), 0) + coeff) % N
 
         def _field(fr):
             return (fr.numerator * pow(fr.denominator, N - 2, N)) % N
+
+        def _conv(fr):
+            # In frac_mode, keep Fraction; else convert to field
+            return fr if _frac_mode else _field(fr) % N
 
         # --- Residual coefficients r_k for k = 0..deg-order ---
         # R(x) = Σ_{(ex,ords),coeff} coeff * x^ex * Π_{o∈ords} y^(o)
@@ -1691,7 +1714,7 @@ class Circuit:
                                 for m in range(deg + 1):
                                     if Dp[nn][m] != 0:
                                         gate("L", m,
-                                             (_field(coeff * contrib * Dp[nn][m])) % N,
+                                             _conv(coeff * contrib * Dp[nn][m]),
                                              acc)
                 elif len(ords) == 2:
                     # coeff * x^ex * y^(o1) * y^(o2)
@@ -1748,10 +1771,10 @@ class Circuit:
                                 # r_k += coeff * total * p_{a,b}
                                 # p_{a,b} is in aO[p_idx], use "O" gate
                                 gate("O", p_idx,
-                                     (_field(coeff * total)) % N, acc)
+                                     _conv(coeff * total), acc)
                 else:
                     raise ValueError("only up to quadratic supported")
-            cons.append((acc, _field(-const) % N))
+            cons.append((acc, _conv(-const)))
 
         # --- Side conditions ---
         # For each (ord, x0, v): Σ_n d_n T_n(x0) = v, d = D^ord · c
@@ -1781,8 +1804,12 @@ class Circuit:
                     continue
                 for m in range(deg + 1):
                     if Dp[nn][m] != 0:
-                        gate("L", m, (_field(tval * Dp[nn][m])) % N, acc)
-            cons.append((acc, _field(v)))
+                        gate("L", m, _conv(tval * Dp[nn][m]), acc)
+            cons.append((acc, _conv(v)))
+
+        # In frac_mode, return the Fraction constraints instead of building
+        if _frac_mode:
+            return (cons, prod_index, deg, n_wit, has_nonlinear)
 
         self._densify(cons, n)
         # Symbolic canonical (no numeric values in equation part).
@@ -1830,6 +1857,171 @@ class Circuit:
         # Store linear constraints for check_witness
         self._cheb_cons = [({i: c for (w, i), c in acc.items() if w == "L"}, rhs)
                            for acc, rhs in cons]
+
+    def _build_cheb_fp(self, spec, S, eps):
+        """Fixed-point residual bound for nonlinear Chebyshev.
+
+        Proves: I know integers z_0..z_N such that for each tau residual
+        F_i (i=0..N), |F_i(z/S)| <= eps, where c = z/S are the fixed-point
+        Chebyshev coefficients.
+
+        The scaled integer residual is:
+          R_i(z) = D*S^2*F_i(z/S)
+                 = Σ_{quad} (D*A_ij)*p_{jk} + S*Σ_{lin} (D*A_ij)*z_j
+                   - S^2*(D*b_i)
+        where D clears denominators of the rational constraint coefficients,
+        p_{jk} = z_j*z_k are product wires.
+
+        Bound: |F_i| <= eps  <=>  |R_i| <= D*S^2*eps =: B.
+        Range proof: R_i + B = Σ_{t=0}^{m-1} 2^t * bit_{i,t}, with
+        2^m > 2*B, and bit*(1-bit)=0 via Hadamard.
+
+        Witness (in aL): z_0..z_N, then bits.
+        Products p_{a,b} in aO via Hadamard (aL=z_a, aR=z_b).
+        Bits in aL with aR=1-bit, aO=0 (Hadamard enforces 0/1).
+        """
+        # Get Fraction constraints from _build_cheb in frac_mode
+        # Use a temporary instance to avoid polluting self
+        tmp = Circuit.__new__(Circuit)
+        cons_frac, prod_index, deg, n_wit, has_nonlinear = tmp._build_cheb(
+            spec, _frac_mode=True)
+        N = deg
+        # cons_frac: [(acc, const)] with acc={(which,idx): Fraction},
+        #           const=Fraction. Constraint: Σ acc*wire + const = 0.
+        # Number of constraints M = len(cons_frac) = N+1
+        M = len(cons_frac)
+        # Compute D = lcm of all denominators
+        from math import gcd
+        D = 1
+        for acc, const in cons_frac:
+            D = D * const.denominator // gcd(D, const.denominator)
+            for coeff in acc.values():
+                D = D * coeff.denominator // gcd(D, coeff.denominator)
+        # B = D * S^2 * eps (eps as Fraction)
+        from fractions import Fraction as Fr
+        if not isinstance(eps, Fr):
+            eps = Fr(eps)
+        B_frac = D * (S ** 2) * eps
+        # B must be integer; if not, ceil it
+        B = (B_frac.numerator + B_frac.denominator - 1) // B_frac.denominator
+        # m bits: 2^m > 2*B
+        m = (2 * B).bit_length()
+        if m == 0:
+            m = 1
+        # Wire layout:
+        # 0..N: z_0..z_N (aL)
+        # N+1 .. N+P: products p_{a,b} (aO via Hadamard)
+        #   P = len(prod_index), indices already assigned in prod_index
+        # After products: M*m bits
+        n_z = N + 1
+        P = len(prod_index)
+        # prod_index maps (a,b) -> wire idx (already N+1-based from _build_cheb)
+        # Verify: prod_index values should be n_z .. n_z+P-1
+        bit0 = n_z + P
+        n_wires = bit0 + M * m
+        n = 1
+        while n < n_wires:
+            n *= 2
+        self.n = n
+        self._cheb_fp_deg = N
+        self._cheb_fp_S = S
+        self._cheb_fp_B = B
+        self._cheb_fp_D = D
+        self._cheb_fp_m = m
+        self._cheb_fp_M = M
+        self._cheb_fp_prod_index = prod_index
+        self._cheb_fp_bit0 = bit0
+        self.mode = "cheb_fp"
+        self.is_complex = False
+
+        cons = []
+        def gate(which, i, coeff, acc):
+            acc[which, i] = (acc.get((which, i), 0) + coeff) % N_field
+        N_field = N  # placeholder, use module N
+        import sys
+        _mod = sys.modules[__name__].N
+        def gate2(which, i, coeff, acc):
+            acc[which, i] = (acc.get((which, i), 0) + coeff) % _mod
+
+        # For each constraint i, build the scaled integer residual constraint
+        for ci, (acc_frac, const_frac) in enumerate(cons_frac):
+            acc = {}
+            # R_i = Σ_{quad} (D*A)*p + S*Σ_{lin} (D*A)*z - S^2*D*b
+            # Constraint: R_i - Σ 2^t*bit = -B
+            # i.e., Σ (D*A)*wire - Σ 2^t*bit = -B + S^2*D*b - (adjust for const)
+            # Note: original constraint is Σ A*wire + const = 0
+            # So Σ A*wire = -const
+            # Scaled: R_i = D*S^2*(Σ A*m(z/S) )
+            # For "L" wires (z_j): coeff contributes D*S*A * z_j
+            #   because A*z_j/S scaled by D*S^2 gives D*S*A*z_j
+            # For "O" wires (p_{a,b}=z_a*z_b): coeff contributes D*A * p
+            #   because A*(z_a*z_b/S^2) scaled by D*S^2 gives D*A*z_a*z_b
+            for (which, idx), coeff in acc_frac.items():
+                if which == "L":
+                    # Linear in z: scale by D*S
+                    gate2("L", idx, int(D * S * coeff), acc)
+                elif which == "O":
+                    # Quadratic (product): scale by D
+                    gate2("O", idx, int(D * coeff), acc)
+                # Note: "R" not used in cheb constraints
+            # Subtract bits: - Σ 2^t * bit_{ci,t}
+            for t in range(m):
+                gate2("L", bit0 + ci * m + t, -(1 << t), acc)
+            # RHS: D*S^2*const - B
+            # (constraint: R - Σ2^t*bit = D*S^2*const - B,
+            #  where R = Σ scaled*wire, and S_i = R - D*S^2*const)
+            rhs = int(D * (S ** 2) * const_frac) - B
+            cons.append((acc, rhs % _mod))
+
+        self._densify(cons, n)
+        # Canonical: cheb_fp(<diffeq>=0,<ics>,deg=N,S=S,eps=eps)
+        # Reuse cheb canon builder logic (simplified)
+        diffeq = spec['diffeq']
+        ics = spec['ics']
+        def _term_str(ex, ords, coeff):
+            cs = (str(coeff.numerator) if coeff.denominator == 1
+                  else "%d/%d" % (coeff.numerator, coeff.denominator))
+            parts = []
+            if cs not in ("1", "-1"):
+                parts.append(cs)
+            elif cs == "-1":
+                parts.append("-")
+            if ex == 1:
+                parts.append("x")
+            elif ex > 1:
+                parts.append("x^%d" % ex)
+            if len(ords) == 0:
+                pass
+            else:
+                for ord_ in ords:
+                    if ord_ == 0:
+                        parts.append("y")
+                    elif ord_ == 1:
+                        parts.append("y'")
+                    else:
+                        parts.append("y" + "'" * ord_)
+            s = "*".join(parts)
+            if s == "" or s == "-":
+                s = cs
+            return s
+        terms = []
+        for (ex, ords) in sorted(diffeq.keys()):
+            terms.append(_term_str(ex, ords, diffeq[(ex, ords)]))
+        diffeq_str = "+".join(terms).replace("+-", "-")
+        ics_parts = []
+        for (ord_, x0) in sorted(ics.keys()):
+            v = ics[(ord_, x0)]
+            vs = (str(v.numerator) if v.denominator == 1
+                  else "%d/%d" % (v.numerator, v.denominator))
+            yname = "y" + "'" * ord_ if ord_ > 0 else "y"
+            ics_parts.append("%s(%d)=%s" % (yname, x0, vs))
+        ics_str = ",".join(ics_parts)
+        eps_str = ("%d/%d" % (eps.numerator, eps.denominator)
+                   if eps.denominator != 1 else str(eps.numerator))
+        self._cheb_fp_canon = ("cheb_fp(%s=0,%s,deg=%d,S=%d,eps=%s)" %
+                               (diffeq_str, ics_str, N, S, eps_str))
+        self.canonical = self._cheb_fp_canon
+        self._cheb_fp_spec_for_proof = spec
 
     def _process_integral(self, poly, spec):
         """Handle int(f,a,b): verify form, store spec for FTC.
@@ -2187,6 +2379,39 @@ class Circuit:
             # All constraints are linear; aR/aO are zero.
             for j, w in enumerate(X):
                 aL[j] = w % N
+            return aL, aR, aO
+        if self.mode == "cheb_fp":
+            # Fixed-point nonlinear Chebyshev.
+            # X = [z_0..z_N, bits...] where z are integers (as field elts),
+            # bits are the binary decomposition of (R_i + B) for each
+            # constraint i.
+            # Wire layout:
+            #   0..N: z (aL)
+            #   N+1..: products p_{a,b} = z_a*z_b (aO via Hadamard)
+            #   bit0..: bits (aL, with aR=1-bit, aO=0 for 0/1 check)
+            Ndeg = self._cheb_fp_deg
+            prod_index = self._cheb_fp_prod_index
+            bit0 = self._cheb_fp_bit0
+            m = self._cheb_fp_m
+            M = self._cheb_fp_M
+            n_z = Ndeg + 1
+            # z in aL
+            for j in range(n_z):
+                aL[j] = X[j] % N
+            # Products: aL=z_a, aR=z_b, aO=z_a*z_b
+            for (a, b), p_idx in prod_index.items():
+                za = aL[a]
+                zb = aL[b]
+                aL[p_idx] = za
+                aR[p_idx] = zb
+                aO[p_idx] = (za * zb) % N
+            # Bits: X[n_z .. n_z+M*m-1]
+            for i in range(M * m):
+                b = X[n_z + i] % N
+                idx = bit0 + i
+                aL[idx] = b
+                aR[idx] = (1 - b) % N
+                aO[idx] = 0
             return aL, aR, aO
         if self.mode == "exact":
             if hasattr(self, '_exact_poly_c'):

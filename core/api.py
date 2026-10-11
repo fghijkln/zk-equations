@@ -348,14 +348,15 @@ def prove_equation(eq_str, witness, precision):
         return proof
     # Chebyshev mode: witness is computed automatically (tau coefficients).
     if circ.mode == "cheb":
-        # Check for nonlinear: not yet supported for prove (no exact field root).
+        # Check for nonlinear: use fixed-point residual bound proof.
         _spec = circ._cheb_spec_for_proof
         _has_nonlinear = any(len(ords) == 2 for (ex, ords) in _spec['diffeq'].keys())
         if _has_nonlinear:
-            raise ValueError(
-                "Nonlinear Chebyshev ODE prove not yet supported: "
-                "exact field root finding is an open problem. "
-                "Use cheb_coefficients() to get approximate coefficients.")
+            # Fixed-point residual bound proof.
+            # S = scale factor, eps = tolerance on |F_i|.
+            # Defaults: S=10^6, eps=10^-5 (accounts for quantization error ~1/S).
+            # Can be overridden via cheb_fp_prove(eq_str, S=S, eps=eps).
+            return cheb_fp_prove(eq_str, S=10**6, eps=Fraction(1, 10**5))
         coeffs = cheb_coefficients(eq_str)
         def _field(fr):
             return (fr.numerator * pow(fr.denominator,
@@ -980,6 +981,123 @@ def cheb_coefficients(eq_str):
         return [Fraction(x).limit_denominator(10**12) for x in c_float]
 
 
+def cheb_fp_prove(eq_str, S=10**6, eps=None):
+    """Fixed-point residual bound proof for nonlinear Chebyshev ODE.
+
+    Proves: I know integers z_0..z_N such that |F_i(z/S)| <= eps for all
+    tau residuals F_i, where S is the scale factor.
+
+    Args:
+        eq_str: e.g. 'cheb(y\' - y + y^2 = 0, y(0) = 0.5, deg = 3)'
+        S: fixed-point scale (default 10^6)
+        eps: tolerance (Fraction or float, default 1e-5)
+
+    Returns proof dict. The proof's "equation" is the canonical
+    cheb_fp(...) form including S and eps.
+    """
+    from fractions import Fraction as Fr
+    if eps is None:
+        eps = Fr(1, 10**5)
+    elif not isinstance(eps, Fr):
+        eps = Fr(eps).limit_denominator(10**12)
+    # Parse to get spec
+    _, _, _, _, _, cheb_spec = circuit_mod.parse_polynomial(eq_str)
+    if cheb_spec is None:
+        raise ValueError("not a Chebyshev equation")
+    spec = {
+        'diffeq': cheb_spec['diffeq'],
+        'order': cheb_spec['order'],
+        'ics': cheb_spec['ics'],
+        'deg': cheb_spec['deg'],
+    }
+    # Get approximate coefficients (floats via cheb_coefficients)
+    coeffs_frac = cheb_coefficients(eq_str)
+    c_float = [float(c) for c in coeffs_frac]
+    N = spec['deg']
+    # Quantize: z_i = round(c_i * S)
+    import math
+    z = [int(math.floor(c * S + 0.5)) for c in c_float]
+    # Build FP circuit
+    circ = circuit_mod.Circuit(
+        eq_str, {0: (0, 0)}, "1", False, False,
+        cheb_fp_params=(spec, S, eps))
+    # Compute scaled residuals R_i and bits
+    # We need the Fraction constraints to compute R_i
+    tmp = circuit_mod.Circuit.__new__(circuit_mod.Circuit)
+    cons_frac, prod_index, deg, n_wit, has_nonlinear = tmp._build_cheb(
+        spec, _frac_mode=True)
+    # Compute D (same as in _build_cheb_fp)
+    from math import gcd
+    D = 1
+    for acc, const in cons_frac:
+        D = D * const.denominator // gcd(D, const.denominator)
+        for coeff in acc.values():
+            D = D * coeff.denominator // gcd(D, coeff.denominator)
+    B = circ._cheb_fp_B
+    m = circ._cheb_fp_m
+    M = len(cons_frac)
+    # Compute R_i for each constraint
+    # R_i = Σ_L (D*S*A)*z + Σ_O (D*A)*p - (-D*S^2*const) ??? 
+    # Actually from _build_cheb_fp: constraint is
+    #   Σ scaled*wire - Σ2^t*bit = -B - D*S^2*const
+    # So R_i + D*S^2*const = Σ scaled*wire
+    # And we need |R_i + D*S^2*const| <= B, i.e., S_i = R_i + D*S^2*const
+    # The bits encode S_i + B = Σ 2^t*bit, so Σ2^t*bit - B = S_i
+    R_vals = []
+    for acc_frac, const_frac in cons_frac:
+        R = 0
+        for (which, idx), coeff in acc_frac.items():
+            if which == "L":
+                R += int(D * S * coeff) * z[idx]
+            elif which == "O":
+                # Product wire: need (a,b) from prod_index reverse map
+                # prod_index: (a,b) -> p_idx. Find (a,b) for idx.
+                ab = None
+                for (a, b), p_idx in prod_index.items():
+                    if p_idx == idx:
+                        ab = (a, b)
+                        break
+                if ab is None:
+                    raise ValueError("product wire not found")
+                a, b = ab
+                R += int(D * coeff) * z[a] * z[b]
+        # S_i = R - D*S^2*const (residual scaled)
+        # where R = Σ scaled*A*wire, and equation is Σ A*wire = const
+        S_i = R - int(D * (S ** 2) * const_frac)
+        R_vals.append(S_i)
+        # Check bound
+        if abs(S_i) > B:
+            raise ValueError(
+                "Residual %d exceeds bound: |%d| > %d (B). "
+                "Try larger S or eps." % (len(R_vals)-1, S_i, B))
+    # Bits: for each S_i, decompose (S_i + B) into m bits
+    bits = []
+    for S_i in R_vals:
+        u = S_i + B  # 0 <= u <= 2B < 2^m
+        for t in range(m):
+            bits.append((u >> t) & 1)
+    # Witness X = z + bits
+    X = z + bits
+    # Evaluate and prove
+    aL, aR, aO = circ.evaluate(X)
+    if not circ.check_constraints(aL, aR, aO):
+        raise ValueError("FP circuit constraints not satisfied (bug)")
+    proof = bulletproof.prove(circ, aL, aR, aO)
+    proof["equation"] = circ.canonical
+    proof["precision"] = ""
+    # Store spec for verification
+    proof["cheb_fp_spec"] = {
+        'diffeq': [((ex, list(ords)), str(coeff))
+                   for (ex, ords), coeff in spec['diffeq'].items()],
+        'order': spec['order'],
+        'ics': [((ord_, x0), str(v)) for (ord_, x0), v in spec['ics'].items()],
+        'deg': spec['deg'],
+        'S': S,
+        'eps': str(eps),
+    }
+    return proof
+
+
 def verify_equation(eq_str, proof, precision):
     """Verify a proof against an equation string. Returns True/False.
 
@@ -994,6 +1112,53 @@ def verify_equation(eq_str, proof, precision):
     Raises ValueError if precision is missing/invalid (caller error,
     except for ODEs where it's optional).
     """
+    # Fixed-point nonlinear Chebyshev: proof has cheb_fp_spec
+    # The eq_str is the original cheb(...) form.
+    try:
+        if isinstance(proof, dict) and "cheb_fp_spec" in proof:
+            from fractions import Fraction as _Fr
+            fps = proof["cheb_fp_spec"]
+            # Parse eq_str to get cheb spec
+            _, _, _, _, _, cheb_spec = circuit_mod.parse_polynomial(eq_str)
+            if cheb_spec is None:
+                return False
+            # Reconstruct spec from proof and compare
+            proof_diffeq = {(ex, tuple(ords)): _Fr(coeff_str)
+                            for (ex, ords), coeff_str in fps['diffeq']}
+            proof_ics = {(ord_, x0): _Fr(v_str)
+                         for (ord_, x0), v_str in fps['ics']}
+            # Compare with parsed spec
+            if set(cheb_spec['diffeq'].keys()) != set(proof_diffeq.keys()):
+                return False
+            for k in proof_diffeq:
+                if cheb_spec['diffeq'][k] != proof_diffeq[k]:
+                    return False
+            if set(cheb_spec['ics'].keys()) != set(proof_ics.keys()):
+                return False
+            for k in proof_ics:
+                if cheb_spec['ics'][k] != proof_ics[k]:
+                    return False
+            if cheb_spec['deg'] != fps['deg']:
+                return False
+            if cheb_spec['order'] != fps['order']:
+                return False
+            # Build FP circuit with proof's S and eps
+            S = fps['S']
+            eps = _Fr(fps['eps'])
+            spec = {
+                'diffeq': proof_diffeq,
+                'order': fps['order'],
+                'ics': proof_ics,
+                'deg': fps['deg'],
+            }
+            circ = circuit_mod.Circuit(
+                eq_str, {0: (0, 0)}, "1", False, False,
+                cheb_fp_params=(spec, S, eps))
+            if proof.get("equation") != circ.canonical:
+                return False
+            return bulletproof.verify(circ, proof)
+    except (ValueError, KeyError, TypeError, AssertionError):
+        return False
     # 2D PDE: pde2d(...)
     pde_parsed = _parse_pde2d_string(eq_str)
     if pde_parsed is not None:
