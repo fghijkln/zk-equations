@@ -881,3 +881,60 @@ pub unsafe extern "C" fn wcurve_msm_vartime(
     let gr = gej_msm_pippenger_vartime(&sc, &pt);
     write_gej(r, &gr);
 }
+
+/// Batch Jacobian to affine conversion using Montgomery's trick.
+/// Takes n Jacobian points (24*u32 each), returns n affine (x,y) as 16*u32 each.
+/// 1 inversion + 3n multiplications instead of n inversions.
+#[no_mangle]
+pub unsafe extern "C" fn wcurve_batch_to_affine(
+    points: *const u32,
+    r: *mut u32,
+    n: usize,
+) {
+    if n == 0 {
+        return;
+    }
+    // Read points
+    let mut pts: Vec<Gej> = Vec::with_capacity(n);
+    for i in 0..n {
+        pts.push(read_gej(points.add(i * 24)));
+    }
+    // Collect Z coordinates (skip infinity: Z == 0)
+    let mut zs: Vec<Fe> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    for (i, p) in pts.iter().enumerate() {
+        if fe_is_zero(&p.z) == 0 {
+            zs.push(p.z);
+            indices.push(i);
+        }
+    }
+    let m = zs.len();
+    if m == 0 {
+        return;
+    }
+    // Montgomery's trick: batch invert zs
+    let mut prefix: Vec<Fe> = Vec::with_capacity(m);
+    let mut acc = fe_set_int(1);
+    for z in &zs {
+        acc = fe_mul(&acc, z);
+        prefix.push(acc);
+    }
+    let mut inv_acc = fe_inv(&prefix[m-1]);
+    let mut inv_zs = vec![fe_set_int(0); m];
+    for i in (0..m).rev() {
+        let prev = if i == 0 { fe_set_int(1) } else { prefix[i-1] };
+        inv_zs[i] = fe_mul(&inv_acc, &prev);
+        inv_acc = fe_mul(&inv_acc, &zs[i]);
+    }
+    // Convert each point: x = X * inv_z^2, y = Y * inv_z^3
+    for (idx, inv_z) in indices.iter().zip(inv_zs.iter()) {
+        let p = &pts[*idx];
+        let inv_z2 = fe_sqr(inv_z);
+        let inv_z3 = fe_mul(&inv_z2, inv_z);
+        let x = fe_mul(&p.x, &inv_z2);
+        let y = fe_mul(&p.y, &inv_z3);
+        // Write x,y as 8*u32 each (16 total)
+        write_fe(r.add(*idx * 16), &x);
+        write_fe(r.add(*idx * 16 + 8), &y);
+    }
+}

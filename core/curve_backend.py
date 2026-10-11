@@ -78,6 +78,7 @@ class _CABIBackend:
         "wcurve_msm_vartime": (None, "P32P32P32L"),
         "wcurve_batch_mul": (None, "P32P32P32L"),
         "wcurve_batch_fold": (None, "P32P32P32P32LI"),
+        "wcurve_batch_to_affine": (None, "P32P32L"),
         "wcurve_from_affine": (None, "P32_P32P32"),
         "wcurve_to_affine": (None, "P32_P32P32PI"),
         "wcurve_compress": (None, "P32_P8"),
@@ -95,6 +96,7 @@ class _CABIBackend:
             "P32_": [u32p],
             "P32P32P32L": [u32p, u32p, u32p, ctypes.c_size_t],
             "P32P32P32P32LI": [u32p, u32p, u32p, u32p, ctypes.c_size_t, ctypes.c_int],
+            "P32P32L": [u32p, u32p, ctypes.c_size_t],
             "P32_P32P32PI": [u32p, u32p, u32p, intp],
             "P32_P8": [u32p, u8p],
             "P8_P32": [u8p, u32p],
@@ -229,9 +231,23 @@ class _CABIBackend:
                 pbuf[i * 24 + 8 + k] = (int(y) >> (32 * k)) & _MASK32
             pbuf[i * 24 + 16] = 1
         self._lib.wcurve_batch_mul(sbuf, pbuf, rbuf, n)
+        # Batch affine conversion: 1 inversion instead of n
+        if hasattr(self._lib, 'wcurve_batch_to_affine'):
+            abuf = (ctypes.c_uint32 * (16 * n))()
+            self._lib.wcurve_batch_to_affine(rbuf, abuf, n)
+            result = []
+            for i in range(n):
+                x = sum(int(abuf[i*16 + k]) << (32*k) for k in range(8))
+                y = sum(int(abuf[i*16 + 8 + k]) << (32*k) for k in range(8))
+                # Check for infinity (all zero)
+                if x == 0 and y == 0:
+                    result.append(None)
+                else:
+                    result.append((x, y))
+            return result
+        # Fallback: per-point conversion
         result = []
         for i in range(n):
-            # Extract 24 limbs for point i
             jac = (ctypes.c_uint32 * 24)()
             for k in range(24):
                 jac[k] = rbuf[i * 24 + k]
