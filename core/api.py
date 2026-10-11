@@ -180,6 +180,36 @@ def _check_precision(eq_str, w_frac, k):
     return best
 
 
+def _parse_pde2d_string(eq_str):
+    """Parse 'pde2d(u_xx + u_yy = <f>, deg = N)'.
+    Returns (f_str, deg) or None if not a pde2d equation.
+    """
+    import re
+    s = eq_str.strip()
+    if not s.startswith("pde2d(") or not s.endswith(")"):
+        return None
+    inner = s[6:-1]  # remove 'pde2d(' and ')'
+    # Split by ',' but careful: f may contain ','? No, f is polynomial.
+    # Format: "u_xx + u_yy = <f>, deg = N"
+    # Find 'deg ='
+    m = re.search(r',\s*deg\s*=\s*(\d+)\s*$', inner)
+    if not m:
+        return None
+    deg = int(m.group(1))
+    lhs_rhs = inner[:m.start()].strip()
+    # lhs_rhs should be "u_xx + u_yy = <f>"
+    if "=" not in lhs_rhs:
+        return None
+    lhs, rhs = lhs_rhs.split("=", 1)
+    lhs = lhs.strip().replace(" ", "")
+    if lhs not in ("u_xx+u_yy", "u_yy+u_xx"):
+        return None
+    f_str = rhs.strip()
+    if not f_str:
+        return None
+    return (f_str, deg)
+
+
 def prove_equation(eq_str, witness, precision):
     """Prove knowledge of `witness` satisfying `eq_str`.
 
@@ -195,6 +225,83 @@ def prove_equation(eq_str, witness, precision):
     missing/invalid (non-ODE), or the witness does not satisfy (within
     precision).
     """
+    # 2D PDE: pde2d(u_xx + u_yy = <f>, deg = N)
+    # k is meaningless (precision is deg); witness is auto-computed.
+    pde_parsed = _parse_pde2d_string(eq_str)
+    if pde_parsed is not None:
+        f_str, deg = pde_parsed
+        # Parse f_str to {(ex, ey): Fraction} for the spec
+        # (Use the same logic as pde2d_poisson_coefficients)
+        import re
+        f = {}
+        s = f_str.replace(" ", "").replace("-", "+-")
+        terms = [t for t in s.split("+") if t]
+        for term in terms:
+            sign = Fraction(1)
+            if term.startswith("-"):
+                sign = Fraction(-1)
+                term = term[1:]
+            if not term:
+                continue
+            factors = term.split("*")
+            coeff = Fraction(1)
+            ex, ey = 0, 0
+            for fac in factors:
+                if not fac:
+                    continue
+                m = re.match(r'^x\^(\d+)$', fac)
+                if m:
+                    ex = int(m.group(1))
+                    continue
+                m = re.match(r'^y\^(\d+)$', fac)
+                if m:
+                    ey = int(m.group(1))
+                    continue
+                if fac == "x":
+                    ex = 1
+                    continue
+                if fac == "y":
+                    ey = 1
+                    continue
+                try:
+                    if "/" in fac:
+                        num, den = fac.split("/")
+                        coeff *= Fraction(int(num), int(den))
+                    elif "." in fac:
+                        coeff *= Fraction(fac)
+                    else:
+                        coeff *= Fraction(int(fac))
+                except:
+                    raise ValueError(f"cannot parse factor '{fac}'")
+            f[(ex, ey)] = f.get((ex, ey), Fraction(0)) + sign * coeff
+        f = {k: v for k, v in f.items() if v != 0}
+        pde_spec = {'f': f, 'deg': deg}
+        # Build circuit directly
+        circ = circuit_mod.Circuit(
+            eq_str, {0: (0, 0)}, "1", False, False,
+            pde_spec=pde_spec)
+        # Solve for coefficients
+        c_2d = pde2d_poisson_coefficients(f_str, deg)
+        # Flatten: idx = m*(N+1) + n
+        N = deg
+        def _field(fr):
+            return (fr.numerator * pow(fr.denominator,
+                                       circuit_mod.N - 2,
+                                       circuit_mod.N)) % circuit_mod.N
+        X = [_field(c_2d[m][n]) for m in range(N + 1) for n in range(N + 1)]
+        if not circ.check_witness(X):
+            raise ValueError("PDE coefficients do not satisfy constraints")
+        aL, aR, aO = circ.evaluate(X)
+        assert circ.check_constraints(aL, aR, aO), "compiler bug: bad pde wires"
+        proof = bulletproof.prove(circ, aL, aR, aO)
+        proof["equation"] = circ.canonical
+        proof["precision"] = ""
+        # Store pde spec for verification
+        proof["pde_spec"] = {
+            'f': [((ex, ey), str(coeff)) for (ex, ey), coeff in f.items()],
+            'deg': deg,
+        }
+        return proof
     # ODEs/Chebyshev: k is meaningless; allow empty (use dummy for compile).
     _, _, _, _, ode_spec, cheb_spec = circuit_mod.parse_polynomial(eq_str)
     is_func_eq = ode_spec is not None or cheb_spec is not None
@@ -887,6 +994,77 @@ def verify_equation(eq_str, proof, precision):
     Raises ValueError if precision is missing/invalid (caller error,
     except for ODEs where it's optional).
     """
+    # 2D PDE: pde2d(...)
+    pde_parsed = _parse_pde2d_string(eq_str)
+    if pde_parsed is not None:
+        try:
+            if not isinstance(proof, dict):
+                return False
+            if "pde_spec" not in proof:
+                return False
+            ps = proof["pde_spec"]
+            # Reconstruct f from proof
+            from fractions import Fraction as _Fr
+            proof_f = {(ex, ey): _Fr(coeff_str)
+                       for (ex, ey), coeff_str in ps['f']}
+            # Parse eq_str f for comparison
+            f_str, deg = pde_parsed
+            # Build f dict from f_str (same logic as prove)
+            import re
+            f = {}
+            s = f_str.replace(" ", "").replace("-", "+-")
+            terms = [t for t in s.split("+") if t]
+            for term in terms:
+                sign = _Fr(1)
+                if term.startswith("-"):
+                    sign = _Fr(-1)
+                    term = term[1:]
+                if not term:
+                    continue
+                factors = term.split("*")
+                coeff = _Fr(1)
+                ex, ey = 0, 0
+                for fac in factors:
+                    if not fac:
+                        continue
+                    m = re.match(r'^x\^(\d+)$', fac)
+                    if m:
+                        ex = int(m.group(1))
+                        continue
+                    m = re.match(r'^y\^(\d+)$', fac)
+                    if m:
+                        ey = int(m.group(1))
+                        continue
+                    if fac == "x":
+                        ex = 1
+                        continue
+                    if fac == "y":
+                        ey = 1
+                        continue
+                    try:
+                        if "/" in fac:
+                            num, den = fac.split("/")
+                            coeff *= _Fr(int(num), int(den))
+                        elif "." in fac:
+                            coeff *= _Fr(fac)
+                        else:
+                            coeff *= _Fr(int(fac))
+                    except:
+                        return False
+                f[(ex, ey)] = f.get((ex, ey), _Fr(0)) + sign * coeff
+            f = {k: v for k, v in f.items() if v != 0}
+            if proof_f != f or ps['deg'] != deg:
+                return False
+            # Build circuit and verify
+            pde_spec = {'f': f, 'deg': deg}
+            circ = circuit_mod.Circuit(
+                eq_str, {0: (0, 0)}, "1", False, False,
+                pde_spec=pde_spec)
+            if proof.get("equation") != circ.canonical:
+                return False
+            return bulletproof.verify(circ, proof)
+        except (ValueError, KeyError, TypeError, AssertionError):
+            return False
     # ODEs/Chebyshev: k is meaningless; allow empty.
     _, _, _, _, ode_spec, cheb_spec = circuit_mod.parse_polynomial(eq_str)
     is_func_eq = ode_spec is not None or cheb_spec is not None

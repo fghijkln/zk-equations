@@ -1056,13 +1056,14 @@ class Circuit:
 
     def __init__(self, eq_str, poly, precision, trans_used, float_seen,
                  force_complex=False, integral_spec=None, ode_spec=None,
-                 cheb_spec=None):
+                 cheb_spec=None, pde_spec=None):
         self.eq_str = eq_str
         # Precision k is MANDATORY for every equation (parsed first).
         self.precision = _parse_precision(precision)
         self.integral_spec = integral_spec
         self.ode_spec = ode_spec
         self.cheb_spec = cheb_spec
+        self.pde_spec = pde_spec
         # Integral equations: FTC mode (bypass exact/tolerance selection).
         # The poly is {1: (±1,0), 0: (0,0)} (placeholder); FTC uses the
         # spec directly.
@@ -1090,6 +1091,14 @@ class Circuit:
             self.mode = "cheb"
             self._build_cheb(cheb_spec)
             self.canonical = self._cheb_canon  # no ;k=
+            return
+        # 2D PDE: pde mode (Chebyshev tau on [-1,1]^2).
+        # k is MEANINGLESS (precision is deg); canonical has no k.
+        if pde_spec is not None:
+            self.is_complex = False
+            self.mode = "pde"
+            self._build_pde(pde_spec)
+            self.canonical = self._pde_canon  # no ;k=
             return
         # Normalize overall sign so that "38 = x^3+2*x+5" and
         # "x^3+2*x+5 = 38" compile to the identical circuit and
@@ -1845,6 +1854,165 @@ class Circuit:
         self._integral_canon = "x=int(%s,%s,%s)" % (f_canon, a_canon, b_canon)
         return poly
 
+    def _build_pde(self, spec):
+        """2D Poisson via Chebyshev tau on [-1,1]^2.
+
+        Spec: {'f': {(ex, ey): Fraction}, 'deg': N}
+        Solves u_xx + u_yy = f(x,y) with zero Dirichlet BCs.
+
+        Basis: u(x,y) = Σ_{m,n=0..N} c_{m,n} T_m(x) T_n(y).
+        Witness (private, in aL): c_{m,n} flattened, idx = m*(N+1)+n.
+
+        Tau: (u_xx + u_yy - f)_{m,n} = 0 for m,n=0..N-2.
+        BCs: u=0 on all four sides (4N equations).
+
+        All linear, exact Fractions. Zero multiplication gates.
+        """
+        f = spec['f']
+        deg = spec['deg']
+        N = deg
+        if N % 2 == 0:
+            raise ValueError(
+                "pde2d requires odd deg (even deg gives singular system)")
+        # Witness count: (N+1)^2. n = next power of 2.
+        n_wit = (N + 1) * (N + 1)
+        n = 1
+        while n < n_wit:
+            n *= 2
+        self.n = n
+        self._pde_deg = N
+        self._pde_f = f
+
+        def idx(m, n_):
+            return m * (N + 1) + n_
+
+        # Chebyshev differentiation matrix (1D)
+        def cheb_diff_mat(K):
+            D = [[Fraction(0)] * (K + 1) for _ in range(K + 1)]
+            if K >= 1:
+                D[K - 1][K] = Fraction(2 * K)
+            for nn in range(K - 2, -1, -1):
+                cbar = Fraction(2) if nn == 0 else Fraction(1)
+                for col in range(K + 1):
+                    D[nn][col] += D[nn + 2][col] / cbar
+                D[nn][nn + 1] += Fraction(2 * (nn + 1)) / cbar
+            return D
+
+        D1 = cheb_diff_mat(N)
+        D2 = [[Fraction(0)] * (N + 1) for _ in range(N + 1)]
+        for i in range(N + 1):
+            for j in range(N + 1):
+                s = Fraction(0)
+                for k in range(N + 1):
+                    s += D1[i][k] * D1[k][j]
+                D2[i][j] = s
+
+        # f in Chebyshev basis
+        def x_pow_cheb(ex):
+            if ex == 0:
+                return [Fraction(1)]
+            p = [Fraction(1)]
+            for _ in range(ex):
+                q = [Fraction(0)] * (len(p) + 1)
+                for k, pk in enumerate(p):
+                    if pk == 0:
+                        continue
+                    q[abs(1 - k)] += pk / 2
+                    q[k + 1] += pk / 2
+                p = q
+            return p
+
+        f_cheb = [[Fraction(0)] * (N + 1) for _ in range(N + 1)]
+        for (ex, ey), coeff in f.items():
+            px = x_pow_cheb(ex)
+            py = x_pow_cheb(ey)
+            for m in range(min(len(px), N + 1)):
+                for n_ in range(min(len(py), N + 1)):
+                    f_cheb[m][n_] += coeff * px[m] * py[n_]
+
+        cons = []
+        # Field modulus (module-level N, but local N shadows it)
+        import sys
+        _mod = sys.modules[__name__].N
+        def _field(fr):
+            return (fr.numerator * pow(fr.denominator, _mod - 2, _mod)) % _mod
+
+        def gate(which, i, coeff, acc):
+            acc[which, i] = (acc.get((which, i), 0) + coeff) % _mod
+
+        # Tau residuals: (u_xx + u_yy - f)_{m,n} = 0 for m,n=0..N-2
+        for m in range(N - 1):
+            for n_ in range(N - 1):
+                acc = {}
+                # u_xx: Σ_a D2[m][a] * c_{a,n}
+                for a in range(N + 1):
+                    if D2[m][a] != 0:
+                        gate("L", idx(a, n_), _field(D2[m][a]), acc)
+                # u_yy: Σ_b D2[n][b] * c_{m,b}
+                for b in range(N + 1):
+                    if D2[n_][b] != 0:
+                        gate("L", idx(m, b), _field(D2[n_][b]), acc)
+                const = f_cheb[m][n_]
+                # Constraint: acc = const (i.e., u_xx+u_yy = f)
+                cons.append((acc, _field(const)))
+
+        # BCs: zero Dirichlet
+        # Left: Σ_m c_{m,n} (-1)^m = 0 for n=0..N
+        for n_ in range(N + 1):
+            acc = {}
+            for m in range(N + 1):
+                gate("L", idx(m, n_), (_field(Fraction(-1) ** m)) % _mod, acc)
+            cons.append((acc, 0))
+        # Right: Σ_m c_{m,n} = 0 for n=0..N
+        for n_ in range(N + 1):
+            acc = {}
+            for m in range(N + 1):
+                gate("L", idx(m, n_), (_field(Fraction(1))) % _mod, acc)
+            cons.append((acc, 0))
+        # Bottom: Σ_n c_{m,n} (-1)^n = 0 for m=1..N-1
+        for m in range(1, N):
+            acc = {}
+            for n_ in range(N + 1):
+                gate("L", idx(m, n_), (_field(Fraction(-1) ** n_)) % _mod, acc)
+            cons.append((acc, 0))
+        # Top: Σ_n c_{m,n} = 0 for m=1..N-1
+        for m in range(1, N):
+            acc = {}
+            for n_ in range(N + 1):
+                gate("L", idx(m, n_), (_field(Fraction(1))) % _mod, acc)
+            cons.append((acc, 0))
+
+        self._densify(cons, n)
+        # Canonical form
+        # f_str: reconstruct from f dict
+        def _fmt_frac(fr):
+            return (str(fr.numerator) if fr.denominator == 1
+                    else "%d/%d" % (fr.numerator, fr.denominator))
+        terms = []
+        for (ex, ey) in sorted(f.keys()):
+            coeff = f[(ex, ey)]
+            cs = _fmt_frac(coeff)
+            parts = []
+            if cs not in ("1", "-1"):
+                parts.append(cs)
+            elif cs == "-1":
+                parts.append("-")
+            if ex == 1:
+                parts.append("x")
+            elif ex > 1:
+                parts.append("x^%d" % ex)
+            if ey == 1:
+                parts.append("y")
+            elif ey > 1:
+                parts.append("y^%d" % ey)
+            s = "*".join(parts)
+            if s == "" or s == "-":
+                s = cs
+            terms.append(s)
+        f_str = "+".join(terms).replace("+-", "-") if terms else "0"
+        self._pde_canon = "pde2d(u_xx+u_yy=%s,deg=%d)" % (f_str, N)
+        self._pde_spec_for_proof = spec
+
     # ---- tolerance mode ----
 
     def _build_tolerance(self, poly, k):
@@ -2014,6 +2182,12 @@ class Circuit:
                     aR[p_idx] = cb
                     aO[p_idx] = (ca * cb) % N
             return aL, aR, aO
+        if self.mode == "pde":
+            # PDE: witness is flattened c_{m,n} as field elements.
+            # All constraints are linear; aR/aO are zero.
+            for j, w in enumerate(X):
+                aL[j] = w % N
+            return aL, aR, aO
         if self.mode == "exact":
             if hasattr(self, '_exact_poly_c'):
                 # Complex exact: Horner with Karatsuba 3-mult.
@@ -2148,6 +2322,12 @@ class Circuit:
                 if lhs != rhs % N:
                     return False
             return True
+        if self.mode == "pde":
+            # PDE: X = flattened c_{m,n} as field elements.
+            # The real check is via evaluate() + check_constraints().
+            # For check_witness, just verify via the circuit constraints.
+            aL, aR, aO = self.evaluate(X)
+            return self.check_constraints(aL, aR, aO)
         if self.mode == "ftc":
             # FTC: X = [F_0..F_{d+1}, v] as field elements.
             # Verify: (j+1)*F_{j+1} = c_j, and v = Σ F_j*(b^j - a^j).
