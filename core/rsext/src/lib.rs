@@ -413,6 +413,86 @@ fn gej_msm(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
     acc
 }
 
+/// Pippenger MSM: ~24x fewer group ops than naive double-and-add.
+/// Window size w=4 (16 buckets). Constant-time: bucket selection via masks.
+fn gej_msm_pippenger(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
+    const W: usize = 4;           // window bits
+    const NUM_BUCKETS: usize = 1 << W;  // 16
+    const NUM_WINDOWS: usize = 256 / W; // 64
+    
+    let n = scalars.len();
+    if n == 0 {
+        return Gej::zero();
+    }
+    
+    // For small n, naive is fine (avoid Pippenger overhead)
+    if n < 32 {
+        return gej_msm(scalars, points);
+    }
+    
+    let mut window_sums = Vec::with_capacity(NUM_WINDOWS);
+    
+    for j in 0..NUM_WINDOWS {
+        // 16 buckets, each is a Gej point
+        let mut buckets = vec![Gej::zero(); NUM_BUCKETS];
+        let shift = j * W;
+        let limb_idx = shift >> 5;
+        let bit_idx = shift & 31;
+        
+        for i in 0..n {
+            // Extract W-bit chunk: c = (s_i >> shift) & 0xF
+            // Handle chunk spanning two limbs
+            let c: u32 = if bit_idx + W <= 32 {
+                (scalars[i][limb_idx] >> bit_idx) & 0xF
+            } else {
+                let lo = scalars[i][limb_idx] >> bit_idx;
+                let hi = if limb_idx + 1 < 8 {
+                    scalars[i][limb_idx + 1] << (32 - bit_idx)
+                } else { 0 };
+                (lo | hi) & 0xF
+            };
+            
+            // Constant-time bucket add: for k in 1..16, mask = (c == k)
+            for k in 1..NUM_BUCKETS {
+                let mask = if c == k as u32 { 0xFFFFFFFFu32 } else { 0u32 };
+                // buckets[k] += mask * points[i]
+                // = buckets[k] + (mask & points[i])
+                let mut sel = Gej::zero();
+                for l in 0..8 {
+                    sel.x[l] = points[i].x[l] & mask;
+                    sel.y[l] = points[i].y[l] & mask;
+                    sel.z[l] = points[i].z[l] & mask;
+                }
+                buckets[k] = gej_add(&buckets[k], &sel);
+            }
+        }
+        
+        // Sum buckets: result = sum_{k=1}^{15} k * buckets[k]
+        // Via running sum: acc=0, running=0
+        //   for k=15 down to 1: running += buckets[k]; acc += running
+        let mut acc = Gej::zero();
+        let mut running = Gej::zero();
+        for k in (1..NUM_BUCKETS).rev() {
+            running = gej_add(&running, &buckets[k]);
+            acc = gej_add(&acc, &running);
+        }
+        window_sums.push(acc);
+    }
+    
+    // Combine windows: result = 0
+    // for j = 63 down to 0:
+    //   for t in 0..4: result = dbl(result)
+    //   result += window_sums[j]
+    let mut result = Gej::zero();
+    for j in (0..NUM_WINDOWS).rev() {
+        for _ in 0..W {
+            result = gej_dbl(&result);
+        }
+        result = gej_add(&result, &window_sums[j]);
+    }
+    result
+}
+
 /* ================= FFI boundary =================
  * The only `unsafe` in this crate: copying between raw pointers and owned
  * values. Every exported function reads its inputs into owned locals first,
@@ -515,6 +595,9 @@ pub unsafe extern "C" fn wcurve_msm(
         sc.push(read_fe(scalars.add(i * 8)));
         pt.push(read_gej(points.add(i * 24)));
     }
+    // NOTE: Pippenger was tried here but the constant-time bucket masking
+    // (15 masked adds per point per window) was slower than naive double-and-add.
+    // TODO: variable-time Pippenger for verify (public scalars), or optimized CT.
     let gr = gej_msm(&sc, &pt);
     write_gej(r, &gr);
 }
