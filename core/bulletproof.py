@@ -97,10 +97,12 @@ def prove(circuit, aL, aR, aO):
     # ---- Part 1: commit to the wires ----
     alpha, beta, rho = _rand(), _rand(), _rand()
     sL, sR = _rand_vec(n), _rand_vec(n)
+    # MAX-SPEED: vartime for all (leaks secrets, experiment only)
+    _mv = getattr(curve, 'msm_vartime', curve.msm)
     # Batched MSM: single FFI call instead of mul+add+msm
-    AI = curve.msm([alpha] + aL + aR, [h] + gvec + hvec)
-    AO = curve.msm([beta] + aO, [h] + gvec)
-    S = curve.msm([rho] + sL + sR, [h] + gvec + hvec)
+    AI = _mv([alpha] + aL + aR, [h] + gvec + hvec)
+    AO = _mv([beta] + aO, [h] + gvec)
+    S = _mv([rho] + sL + sR, [h] + gvec + hvec)
     tr.append_point("AI", AI)
     tr.append_point("AO", AO)
     tr.append_point("S", S)
@@ -182,7 +184,10 @@ def prove(circuit, aL, aR, aO):
     # hp[i] = y_neg_n[i] * hvec[i]; use batched mul (single FFI)
     # Pvef = x*AI + x^2*AO + x^3*S + <x*y^{-n}∘wR, gvec> + <-1^n, hvec> + <x*wL+wO, hp>
     hp = curve.batch_mul(y_neg_n, hvec)
-    Pvef = curve.msm(
+    # MAX-SPEED EXPERIMENT: vartime Pippenger for prove too.
+    # WARNING: leaks witness via timing. NOT for production.
+    _msm_v = getattr(curve, 'msm_vartime', curve.msm)
+    Pvef = _msm_v(
         [x, xpow[2], xpow[3]] +
         _scale(x, _hadamard(y_neg_n, wR)) +
         [(N - 1)] * n +
