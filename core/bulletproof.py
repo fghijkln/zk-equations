@@ -97,11 +97,10 @@ def prove(circuit, aL, aR, aO):
     # ---- Part 1: commit to the wires ----
     alpha, beta, rho = _rand(), _rand(), _rand()
     sL, sR = _rand_vec(n), _rand_vec(n)
-    AI = curve.add(curve.add(curve.mul(alpha, h), _vec_commit(aL, gvec)),
-                             _vec_commit(aR, hvec))
-    AO = curve.add(curve.mul(beta, h), _vec_commit(aO, gvec))
-    S = curve.add(curve.add(curve.mul(rho, h), _vec_commit(sL, gvec)),
-                  _vec_commit(sR, hvec))
+    # Batched MSM: single FFI call instead of mul+add+msm
+    AI = curve.msm([alpha] + aL + aR, [h] + gvec + hvec)
+    AO = curve.msm([beta] + aO, [h] + gvec)
+    S = curve.msm([rho] + sL + sR, [h] + gvec + hvec)
     tr.append_point("AI", AI)
     tr.append_point("AO", AO)
     tr.append_point("S", S)
@@ -159,7 +158,7 @@ def prove(circuit, aL, aR, aO):
     for i in (1, 3, 4, 5, 6):
         tau = _rand()
         taus[i] = tau
-        Ts[i] = curve.add(curve.mul(t[i], g), curve.mul(tau, h))
+        Ts[i] = curve.msm([t[i], tau], [g, h])
         tr.append_point("T%d" % i, Ts[i])
     x = tr.challenge("x")
     xpow = [1] * 7
@@ -180,16 +179,19 @@ def prove(circuit, aL, aR, aO):
     tr.append_scalar("t_hat", t_hat)
 
     # ---- transformed generators + verifier-computable P ----
-    hp = [curve.mul(y_neg_n[i], hvec[i]) for i in range(n)]
-    Pvef = curve.mul(x, AI)
-    Pvef = curve.add(Pvef, curve.mul(xpow[2], AO))
-    Pvef = curve.add(Pvef, curve.mul(xpow[3], S))
-    Pvef = curve.add(Pvef, _vec_commit(_scale(x, _hadamard(y_neg_n, wR)), gvec))
-    Pvef = curve.add(Pvef, _vec_commit([(N - 1)] * n, hvec))      # hvec^{-1^n}
-    Pvef = curve.add(Pvef, _vec_commit(_add_vec(_scale(x, wL), wO), hp))
+    # hp[i] = y_neg_n[i] * hvec[i]; use batched mul (single FFI)
+    # Pvef = x*AI + x^2*AO + x^3*S + <x*y^{-n}∘wR, gvec> + <-1^n, hvec> + <x*wL+wO, hp>
+    hp = curve.batch_mul(y_neg_n, hvec)
+    Pvef = curve.msm(
+        [x, xpow[2], xpow[3]] +
+        _scale(x, _hadamard(y_neg_n, wR)) +
+        [(N - 1)] * n +
+        _add_vec(_scale(x, wL), wO),
+        [AI, AO, S] + gvec + hvec + hp)
 
     # ---- inner-product argument: <lx, rx> = t_hat ----
-    Pip = curve.add(Pvef, curve.mul((N - mu) % N, h))  # Pvef * h^{-mu}
+    # Pip = Pvef + (N-mu)*h
+    Pip = curve.msm([1, (N - mu) % N], [Pvef, h])
     ipa_proof = ipa.prove(gvec, hp, curve.U(), Pip, t_hat, lx, rx, tr)
 
     return {
@@ -271,22 +273,25 @@ def verify(circuit, proof):
         tr.append_scalar("t_hat", t_hat)
 
         # check (a): g^{t_hat} h^{tau_x} =?= g^{delta*x^2} prod_{i!=2} T_i^{x^i}
-        lhs = curve.add(curve.mul(t_hat, g), curve.mul(tau_x, h))
-        rhs = curve.mul((delta_yz * xpow[2]) % N, g)
-        for i in (1, 3, 4, 5, 6):
-            rhs = curve.add(rhs, curve.mul(xpow[i], Ts[i]))
+        # Batched: lhs = MSM([t_hat, tau_x], [g, h])
+        lhs = curve.msm([t_hat, tau_x], [g, h])
+        # rhs = MSM([delta*x^2, x^1, x^3, x^4, x^5, x^6], [g, T1, T3, T4, T5, T6])
+        rhs = curve.msm(
+            [(delta_yz * xpow[2]) % N, xpow[1], xpow[3], xpow[4], xpow[5], xpow[6]],
+            [g, Ts[1], Ts[3], Ts[4], Ts[5], Ts[6]])
         if lhs != rhs:
             return False
 
         # check (b): inner-product argument
-        hp = [curve.mul(y_neg_n[i], hvec[i]) for i in range(n)]
-        Pvef = curve.mul(x, AI)
-        Pvef = curve.add(Pvef, curve.mul(xpow[2], AO))
-        Pvef = curve.add(Pvef, curve.mul(xpow[3], S))
-        Pvef = curve.add(Pvef, _vec_commit(_scale(x, _hadamard(y_neg_n, wR)), gvec))
-        Pvef = curve.add(Pvef, _vec_commit([(N - 1)] * n, hvec))
-        Pvef = curve.add(Pvef, _vec_commit(_add_vec(_scale(x, wL), wO), hp))
-        Pip = curve.add(Pvef, curve.mul((N - mu) % N, h))
+        hp = curve.batch_mul(y_neg_n, hvec)
+        # Pvef batched as in prove()
+        Pvef = curve.msm(
+            [x, xpow[2], xpow[3]] +
+            _scale(x, _hadamard(y_neg_n, wR)) +
+            [(N - 1)] * n +
+            _add_vec(_scale(x, wL), wO),
+            [AI, AO, S] + gvec + hvec + hp)
+        Pip = curve.msm([1, (N - mu) % N], [Pvef, h])
         ipa_proof = ipa.from_jsonable(proof["ipa"])
         return ipa.verify(gvec, hp, curve.U(), Pip, t_hat, ipa_proof, tr)
     except (ValueError, KeyError, TypeError, AssertionError):

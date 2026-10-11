@@ -226,3 +226,13 @@ def Hvec(i):
     if i not in _hvec_cache:
         _hvec_cache[i] = hash_to_curve(b"zkeq-Hvec-v1:" + str(i).encode())
     return _hvec_cache[i]
+
+
+def batch_mul(scalars, points):
+    """Batched scalar-point multiplication: [s_i * P_i].
+
+    Python fallback: loops over mul(). For performance, this should be
+    implemented in the C extension as a single FFI call.
+    TODO: Add to curve_ext.c as batch_mul(scalars, points).
+    """
+    return [mul(s, P) for s, P in zip(scalars, points)]
