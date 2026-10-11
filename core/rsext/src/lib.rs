@@ -497,10 +497,7 @@ fn gej_msm_pippenger(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
 /// WARNING: NOT constant-time. Bucket index leaks via cache timing.
 /// Only use when scalars are public (e.g., verifier challenges).
 fn gej_msm_pippenger_vartime(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
-    const W: usize = 4;
-    const NUM_BUCKETS: usize = 1 << W;
-    const NUM_WINDOWS: usize = 256 / W;
-    
+    // MAX-SPEED: adaptive window size
     let n = scalars.len();
     if n == 0 {
         return Gej::zero();
@@ -508,6 +505,13 @@ fn gej_msm_pippenger_vartime(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
     if n < 32 {
         return gej_msm(scalars, points);
     }
+    // W=5 for n>=256 (32 buckets), W=4 for smaller
+    if n >= 256 {
+        return gej_msm_pippenger_vartime_w5(scalars, points);
+    }
+    const W: usize = 4;
+    const NUM_BUCKETS: usize = 1 << W;
+    const NUM_WINDOWS: usize = 256 / W;
     
     let mut window_sums = Vec::with_capacity(NUM_WINDOWS);
     
@@ -528,6 +532,55 @@ fn gej_msm_pippenger_vartime(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
                 (lo | hi) & 0xF
             };
             // Variable-time: direct bucket index (fast, but leaks c)
+            if c != 0 {
+                buckets[c as usize] = gej_add(&buckets[c as usize], &points[i]);
+            }
+        }
+        
+        let mut acc = Gej::zero();
+        let mut running = Gej::zero();
+        for k in (1..NUM_BUCKETS).rev() {
+            running = gej_add(&running, &buckets[k]);
+            acc = gej_add(&acc, &running);
+        }
+        window_sums.push(acc);
+    }
+    
+    let mut result = Gej::zero();
+    for j in (0..NUM_WINDOWS).rev() {
+        for _ in 0..W {
+            result = gej_dbl(&result);
+        }
+        result = gej_add(&result, &window_sums[j]);
+    }
+    result
+}
+
+/// W=5 vartime Pippenger for large n (>=256). 32 buckets, 52 windows.
+fn gej_msm_pippenger_vartime_w5(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
+    const W: usize = 5;
+    const NUM_BUCKETS: usize = 1 << W;  // 32
+    const NUM_WINDOWS: usize = 52;      // ceil(256/5)
+    
+    let n = scalars.len();
+    let mut window_sums = Vec::with_capacity(NUM_WINDOWS);
+    
+    for j in 0..NUM_WINDOWS {
+        let mut buckets = vec![Gej::zero(); NUM_BUCKETS];
+        let shift = j * W;
+        let limb_idx = shift >> 5;
+        let bit_idx = shift & 31;
+        
+        for i in 0..n {
+            let c: u32 = if bit_idx + W <= 32 {
+                (scalars[i][limb_idx] >> bit_idx) & 0x1F
+            } else {
+                let lo = scalars[i][limb_idx] >> bit_idx;
+                let hi = if limb_idx + 1 < 8 {
+                    scalars[i][limb_idx + 1] << (32 - bit_idx)
+                } else { 0 };
+                (lo | hi) & 0x1F
+            };
             if c != 0 {
                 buckets[c as usize] = gej_add(&buckets[c as usize], &points[i]);
             }
