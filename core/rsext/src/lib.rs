@@ -390,6 +390,140 @@ fn gej_add(a: &Gej, b: &Gej) -> Gej {
     rout
 }
 
+/* a + b. Plain add-2007-bl (variable-time: branches on infinity /
+ * equality). Much cheaper than the complete formula above: no internal
+ * doubling, no masked selects. Used by the max-speed paths only. */
+fn gej_add_plain(a: &Gej, b: &Gej) -> Gej {
+    if fe_is_zero(&a.z) == 1 {
+        return *b;
+    }
+    if fe_is_zero(&b.z) == 1 {
+        return *a;
+    }
+    let z1z1 = fe_sqr(&a.z);
+    let z2z2 = fe_sqr(&b.z);
+    let u1 = fe_mul(&a.x, &z2z2);
+    let u2 = fe_mul(&b.x, &z1z1);
+    let t1 = fe_mul(&a.y, &b.z);
+    let s1 = fe_mul(&t1, &z2z2);
+    let t2 = fe_mul(&b.y, &a.z);
+    let s2 = fe_mul(&t2, &z1z1);
+    if fe_equal(&u1, &u2) == 1 {
+        if fe_equal(&s1, &s2) == 0 {
+            return Gej::zero(); /* a + (-a) = infinity */
+        }
+        return gej_dbl(a); /* a == b */
+    }
+    let h = fe_sub(&u2, &u1);
+    let hh = fe_add(&h, &h);
+    let i = fe_sqr(&hh);
+    let j = fe_mul(&h, &i);
+    let sd = fe_sub(&s2, &s1);
+    let r = fe_add(&sd, &sd);
+    let v = fe_mul(&u1, &i);
+    let mut x3 = fe_sqr(&r);
+    x3 = fe_sub(&x3, &j);
+    let v2 = fe_add(&v, &v);
+    x3 = fe_sub(&x3, &v2);
+    let vd = fe_sub(&v, &x3);
+    let mut y3 = fe_mul(&r, &vd);
+    let s1j = fe_mul(&s1, &j);
+    let s1j2 = fe_add(&s1j, &s1j);
+    y3 = fe_sub(&y3, &s1j2);
+    let zs = fe_add(&a.z, &b.z);
+    let mut zt = fe_sqr(&zs);
+    zt = fe_sub(&zt, &z1z1);
+    zt = fe_sub(&zt, &z2z2);
+    let z3 = fe_mul(&zt, &h);
+    Gej { x: x3, y: y3, z: z3 }
+}
+
+/* a + b where b is affine (z == 1). madd-2007-bl, variable-time.
+ * Used for Pippenger bucket accumulation (points are affine). */
+fn gej_add_mixed(a: &Gej, b: &Gej) -> Gej {
+    if fe_is_zero(&a.z) == 1 {
+        return *b;
+    }
+    let z1z1 = fe_sqr(&a.z);
+    let u2 = fe_mul(&b.x, &z1z1);
+    let t = fe_mul(&b.y, &a.z);
+    let s2 = fe_mul(&t, &z1z1);
+    if fe_equal(&u2, &a.x) == 1 {
+        if fe_equal(&s2, &a.y) == 0 {
+            return Gej::zero();
+        }
+        return gej_dbl(a);
+    }
+    let h = fe_sub(&u2, &a.x);
+    let hh = fe_sqr(&h);
+    let hh2 = fe_add(&hh, &hh);
+    let i = fe_add(&hh2, &hh2); /* 4*hh */
+    let j = fe_mul(&h, &i);
+    let sd = fe_sub(&s2, &a.y);
+    let r = fe_add(&sd, &sd);
+    let v = fe_mul(&a.x, &i);
+    let mut x3 = fe_sqr(&r);
+    x3 = fe_sub(&x3, &j);
+    let v2 = fe_add(&v, &v);
+    x3 = fe_sub(&x3, &v2);
+    let vd = fe_sub(&v, &x3);
+    let mut y3 = fe_mul(&r, &vd);
+    let ayj = fe_mul(&a.y, &j);
+    let ayj2 = fe_add(&ayj, &ayj);
+    y3 = fe_sub(&y3, &ayj2);
+    let zh = fe_mul(&a.z, &h);
+    let z3 = fe_add(&zh, &zh);
+    Gej { x: x3, y: y3, z: z3 }
+}
+
+/* Window digit: bits [4w, 4w+4) of s. Windows are 4-aligned, limbs
+ * 32-bit, so a digit never spans two limbs (bit offset <= 28). */
+fn win_digit(s: &[u32; 8], w: usize) -> usize {
+    let shift = 4 * w;
+    ((s[shift >> 5] >> (shift & 31)) & 0xF) as usize
+}
+
+/* s * p via a 4-bit window: table of 16 multiples, 64 rounds of
+ * (4 doublings + 1 plain add). Variable-time (max-speed path). */
+fn gej_mul_windowed(s: &[u32; 8], p: &Gej) -> Gej {
+    let mut table = [Gej::zero(); 16];
+    table[1] = *p;
+    for i in 2..16 {
+        table[i] = gej_add_plain(&table[i - 1], p);
+    }
+    let mut acc = Gej::zero();
+    for w in (0..64).rev() {
+        for _ in 0..4 {
+            acc = gej_dbl(&acc);
+        }
+        acc = gej_add_plain(&acc, &table[win_digit(s, w)]);
+    }
+    acc
+}
+
+/* s1 * p1 + s2 * p2 with shared doubling chain (Shamir, 4-bit window
+ * on both scalars). Used by batch_fold, where every output point is a
+ * combination of the same two scalars with different points. */
+fn gej_mul2_windowed(s1: &[u32; 8], p1: &Gej, s2: &[u32; 8], p2: &Gej) -> Gej {
+    let mut t1 = [Gej::zero(); 16];
+    let mut t2 = [Gej::zero(); 16];
+    t1[1] = *p1;
+    t2[1] = *p2;
+    for i in 2..16 {
+        t1[i] = gej_add_plain(&t1[i - 1], p1);
+        t2[i] = gej_add_plain(&t2[i - 1], p2);
+    }
+    let mut acc = Gej::zero();
+    for w in (0..64).rev() {
+        for _ in 0..4 {
+            acc = gej_dbl(&acc);
+        }
+        acc = gej_add_plain(&acc, &t1[win_digit(s1, w)]);
+        acc = gej_add_plain(&acc, &t2[win_digit(s2, w)]);
+    }
+    acc
+}
+
 /* sum_i scalars[i] * points[i]. Fixed 256 iterations, masked adds.
  * The caller guarantees scalars.len() == points.len(). */
 fn gej_msm(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
@@ -502,8 +636,15 @@ fn gej_msm_pippenger_vartime(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
     if n == 0 {
         return Gej::zero();
     }
-    if n < 32 {
-        return gej_msm(scalars, points);
+    if n < 8 {
+        // Small n: sum of windowed muls beats both the naive masked MSM
+        // and Pippenger (whose bucket-sum overhead is n-independent).
+        let mut acc = Gej::zero();
+        for i in 0..n {
+            let t = gej_mul_windowed(&scalars[i], &points[i]);
+            acc = gej_add_plain(&acc, &t);
+        }
+        return acc;
     }
     // W=5 for n>=256 (32 buckets), W=4 for smaller
     if n >= 256 {
@@ -512,15 +653,21 @@ fn gej_msm_pippenger_vartime(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
     const W: usize = 4;
     const NUM_BUCKETS: usize = 1 << W;
     const NUM_WINDOWS: usize = 256 / W;
-    
+
+    // Points arriving with z == 1 are affine: bucket adds can use the
+    // cheaper mixed addition. Anything else falls back to plain adds.
+    let aff: Vec<bool> = points.iter()
+        .map(|p| p.z == [1, 0, 0, 0, 0, 0, 0, 0])
+        .collect();
+
     let mut window_sums = Vec::with_capacity(NUM_WINDOWS);
-    
+
     for j in 0..NUM_WINDOWS {
         let mut buckets = vec![Gej::zero(); NUM_BUCKETS];
         let shift = j * W;
         let limb_idx = shift >> 5;
         let bit_idx = shift & 31;
-        
+
         for i in 0..n {
             let c: u32 = if bit_idx + W <= 32 {
                 (scalars[i][limb_idx] >> bit_idx) & 0xF
@@ -533,44 +680,54 @@ fn gej_msm_pippenger_vartime(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
             };
             // Variable-time: direct bucket index (fast, but leaks c)
             if c != 0 {
-                buckets[c as usize] = gej_add(&buckets[c as usize], &points[i]);
+                let b = &buckets[c as usize];
+                buckets[c as usize] = if aff[i] {
+                    gej_add_mixed(b, &points[i])
+                } else {
+                    gej_add_plain(b, &points[i])
+                };
             }
         }
-        
+
         let mut acc = Gej::zero();
         let mut running = Gej::zero();
         for k in (1..NUM_BUCKETS).rev() {
-            running = gej_add(&running, &buckets[k]);
-            acc = gej_add(&acc, &running);
+            running = gej_add_plain(&running, &buckets[k]);
+            acc = gej_add_plain(&acc, &running);
         }
         window_sums.push(acc);
     }
-    
+
     let mut result = Gej::zero();
     for j in (0..NUM_WINDOWS).rev() {
         for _ in 0..W {
             result = gej_dbl(&result);
         }
-        result = gej_add(&result, &window_sums[j]);
+        result = gej_add_plain(&result, &window_sums[j]);
     }
     result
 }
 
 /// W=5 vartime Pippenger for large n (>=256). 32 buckets, 52 windows.
+/// W=5 vartime Pippenger for large n (>=256). 32 buckets, 52 windows.
 fn gej_msm_pippenger_vartime_w5(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
     const W: usize = 5;
     const NUM_BUCKETS: usize = 1 << W;  // 32
     const NUM_WINDOWS: usize = 52;      // ceil(256/5)
-    
+
+    let aff: Vec<bool> = points.iter()
+        .map(|p| p.z == [1, 0, 0, 0, 0, 0, 0, 0])
+        .collect();
+
     let n = scalars.len();
     let mut window_sums = Vec::with_capacity(NUM_WINDOWS);
-    
+
     for j in 0..NUM_WINDOWS {
         let mut buckets = vec![Gej::zero(); NUM_BUCKETS];
         let shift = j * W;
         let limb_idx = shift >> 5;
         let bit_idx = shift & 31;
-        
+
         for i in 0..n {
             let c: u32 = if bit_idx + W <= 32 {
                 (scalars[i][limb_idx] >> bit_idx) & 0x1F
@@ -582,25 +739,30 @@ fn gej_msm_pippenger_vartime_w5(scalars: &[[u32; 8]], points: &[Gej]) -> Gej {
                 (lo | hi) & 0x1F
             };
             if c != 0 {
-                buckets[c as usize] = gej_add(&buckets[c as usize], &points[i]);
+                let b = &buckets[c as usize];
+                buckets[c as usize] = if aff[i] {
+                    gej_add_mixed(b, &points[i])
+                } else {
+                    gej_add_plain(b, &points[i])
+                };
             }
         }
-        
+
         let mut acc = Gej::zero();
         let mut running = Gej::zero();
         for k in (1..NUM_BUCKETS).rev() {
-            running = gej_add(&running, &buckets[k]);
-            acc = gej_add(&acc, &running);
+            running = gej_add_plain(&running, &buckets[k]);
+            acc = gej_add_plain(&acc, &running);
         }
         window_sums.push(acc);
     }
-    
+
     let mut result = Gej::zero();
     for j in (0..NUM_WINDOWS).rev() {
         for _ in 0..W {
             result = gej_dbl(&result);
         }
-        result = gej_add(&result, &window_sums[j]);
+        result = gej_add_plain(&result, &window_sums[j]);
     }
     result
 }
@@ -711,6 +873,16 @@ pub unsafe extern "C" fn wcurve_msm(
     // (15 masked adds per point per window) was slower than naive double-and-add.
     // TODO: variable-time Pippenger for verify (public scalars), or optimized CT.
     let gr = gej_msm(&sc, &pt);
+    write_gej(r, &gr);
+}
+
+/// r = s * p. Windowed scalar multiplication (variable-time,
+/// max-speed path). In-place safe.
+#[no_mangle]
+pub unsafe extern "C" fn wcurve_mul(s: *const u32, p: *const u32, r: *mut u32) {
+    let ss = read_fe(s);
+    let pp = read_gej(p);
+    let gr = gej_mul_windowed(&ss, &pp);
     write_gej(r, &gr);
 }
 
@@ -828,7 +1000,7 @@ pub unsafe extern "C" fn wcurve_batch_mul(
     for i in 0..n {
         let s = read_fe(scalars.add(i * 8));
         let p = read_gej(points.add(i * 24));
-        let gr = gej_msm(&[s], &[p]);
+        let gr = gej_mul_windowed(&s, &p);
         write_gej(r.add(i * 24), &gr);
     }
 }
@@ -852,9 +1024,7 @@ pub unsafe extern "C" fn wcurve_batch_fold(
     for i in 0..n2 {
         let p1 = read_gej(gens.add(i * 24));
         let p2 = read_gej(gens.add((n2 + i) * 24));
-        let r1 = gej_msm(&[s1], &[p1]);
-        let r2 = gej_msm(&[s2], &[p2]);
-        let gr = gej_add(&r1, &r2);
+        let gr = gej_mul2_windowed(&s1, &p1, &s2, &p2);
         write_gej(r.add(i * 24), &gr);
     }
 }

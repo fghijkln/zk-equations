@@ -76,6 +76,7 @@ class _CABIBackend:
         "wcurve_is_inf": (ctypes.c_int, "P32_"),
         "wcurve_msm": (None, "P32P32P32L"),
         "wcurve_msm_vartime": (None, "P32P32P32L"),
+        "wcurve_mul": (None, "P32_P32P32"),
         "wcurve_batch_mul": (None, "P32P32P32L"),
         "wcurve_batch_fold": (None, "P32P32P32P32LI"),
         "wcurve_batch_to_affine": (None, "P32P32L"),
@@ -154,6 +155,14 @@ class _CABIBackend:
         return self.to_affine(r)
 
     def mul(self, k, p):
+        # Fast path: dedicated windowed scalar mul in the native lib
+        # (the generic msm entry is the fixed-time naive path).
+        if p is not None and hasattr(self._lib, 'wcurve_mul'):
+            sbuf = self._u32buf(_int_to_limbs(int(k) % N))
+            abuf = self._jac(p)
+            r = (ctypes.c_uint32 * 24)()
+            self._lib.wcurve_mul(sbuf, abuf, r)
+            return self.to_affine(r)
         return self.msm([k], [p])
 
     def msm(self, scalars, points):

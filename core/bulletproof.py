@@ -160,7 +160,7 @@ def prove(circuit, aL, aR, aO):
     for i in (1, 3, 4, 5, 6):
         tau = _rand()
         taus[i] = tau
-        Ts[i] = curve.msm([t[i], tau], [g, h])
+        Ts[i] = _mv([t[i], tau], [g, h])
         tr.append_point("T%d" % i, Ts[i])
     x = tr.challenge("x")
     xpow = [1] * 7
@@ -196,7 +196,7 @@ def prove(circuit, aL, aR, aO):
 
     # ---- inner-product argument: <lx, rx> = t_hat ----
     # Pip = Pvef + (N-mu)*h
-    Pip = curve.msm([1, (N - mu) % N], [Pvef, h])
+    Pip = _mv([1, (N - mu) % N], [Pvef, h])
     ipa_proof = ipa.prove(gvec, hp, curve.U(), Pip, t_hat, lx, rx, tr)
 
     return {
@@ -214,6 +214,8 @@ def prove(circuit, aL, aR, aO):
 def verify(circuit, proof):
     """Verify a proof dict against the circuit. Returns True/False."""
     try:
+        # MAX-SPEED: vartime for the small MSMs too (all scalars public here)
+        _msm_v = getattr(curve, 'msm_vartime', curve.msm)
         n, Q = circuit.n, circuit.q
         gvec = [curve.Gvec(i) for i in range(n)]
         hvec = [curve.Hvec(i) for i in range(n)]
@@ -279,9 +281,9 @@ def verify(circuit, proof):
 
         # check (a): g^{t_hat} h^{tau_x} =?= g^{delta*x^2} prod_{i!=2} T_i^{x^i}
         # Batched: lhs = MSM([t_hat, tau_x], [g, h])
-        lhs = curve.msm([t_hat, tau_x], [g, h])
+        lhs = _msm_v([t_hat, tau_x], [g, h])
         # rhs = MSM([delta*x^2, x^1, x^3, x^4, x^5, x^6], [g, T1, T3, T4, T5, T6])
-        rhs = curve.msm(
+        rhs = _msm_v(
             [(delta_yz * xpow[2]) % N, xpow[1], xpow[3], xpow[4], xpow[5], xpow[6]],
             [g, Ts[1], Ts[3], Ts[4], Ts[5], Ts[6]])
         if lhs != rhs:
@@ -298,7 +300,7 @@ def verify(circuit, proof):
             [(N - 1)] * n +
             _add_vec(_scale(x, wL), wO),
             [AI, AO, S] + gvec + hvec + hp)
-        Pip = curve.msm([1, (N - mu) % N], [Pvef, h])
+        Pip = _msm_v([1, (N - mu) % N], [Pvef, h])
         ipa_proof = ipa.from_jsonable(proof["ipa"])
         return ipa.verify(gvec, hp, curve.U(), Pip, t_hat, ipa_proof, tr)
     except (ValueError, KeyError, TypeError, AssertionError):

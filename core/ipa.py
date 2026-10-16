@@ -57,6 +57,11 @@ def _fold_gens_h(gens, x, x_inv, n2):
 
 
 def _vec_commit(scalars, gens):
+    # MAX-SPEED: vartime MSM (same treatment as bulletproof's big MSMs;
+    # the generic curve.msm is the fixed-time naive path).
+    mv = getattr(curve, 'msm_vartime', None)
+    if mv is not None:
+        return mv(scalars, gens)
     return curve.msm(scalars, gens)
 
 
