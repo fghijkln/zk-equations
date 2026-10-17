@@ -38,19 +38,15 @@ def prove(equation, witness, precision=""):
 def verify(equation, proof_json, precision=""):
     """Verify a proof (JSON string) against `equation`.
 
-    precision: k as string. May be left empty: then the k recorded in
-    the proof itself is used (the proof carries it since generation).
-    If given, it must match the k used at prove time -- the core
-    verifier stays strict and never reads k from the proof on its own.
+    precision: the required k as string. May be left empty (accept the
+    proof's own proven precision). If given, any k up to the proven
+    k_p passes (coarser requirement); a k larger than k_p fails.
+    Semantics live in core.api.verify_equation.
     """
     try:
         proof = json.loads(proof_json)
     except (ValueError, TypeError):
         return _err("proof is not valid JSON")
-    if not (precision or "").strip():
-        embedded = proof.get("precision") if isinstance(proof, dict) else None
-        if embedded is not None and str(embedded).strip():
-            precision = str(embedded)
     try:
         valid = zk.verify_equation(equation.strip(), proof,
                                    (precision or "").strip())

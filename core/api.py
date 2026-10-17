@@ -466,8 +466,9 @@ def prove_equation(eq_str, witness, precision):
     assert circ.check_constraints(aL, aR, aO), "compiler bug: bad witness wires"
     proof = bulletproof.prove(circ, aL, aR, aO)
     proof["equation"] = circ.canonical
-    proof["precision"] = k  # informational only; verifiers MUST NOT
-    # rely on it -- verify_equation requires k as explicit input
+    proof["precision"] = k  # the proven precision 1/k; verifiers
+    # rebuild the circuit from it and check their own requirement
+    # k_verify <= k against it (see verify_equation)
     return proof
 
 
@@ -1111,16 +1112,18 @@ def cheb_fp_prove(eq_str, S=10**6, eps=None):
 def verify_equation(eq_str, proof, precision):
     """Verify a proof against an equation string. Returns True/False.
 
-    precision: k (int/str), MANDATORY for algebraic/integral equations.
-    For ODEs, k is meaningless (precision is deg) and may be empty.
-    The verifier must supply the precision explicitly; it is NEVER taken
-    from the proof itself. (Reading k from the proof would let a malicious
-    prover weaken the requirement.) Returns False (rather than raising)
-    on any malformed proof, a canonical-equation mismatch (covers
-    moved-term spellings AND precision mismatches, since canonical
-    includes ";k=<k>"), or a precision mismatch.
-    Raises ValueError if precision is missing/invalid (caller error,
-    except for ODEs where it's optional).
+    precision: the verifier's REQUIRED k (int/str) for algebraic/
+    integral equations. Coarse semantics, same pattern as the ODE deg
+    rule below: the circuit is rebuilt with the PROVER's k_p recorded
+    in the proof and the proof is checked against that circuit, so k_p
+    cannot be faked (a proof made for another k does not verify).
+    The requirement is then k <= k_p: a proof of finer precision
+    satisfies a coarser demand, and a demand finer than the proven
+    precision fails. An empty precision means "no extra requirement"
+    (accept the proof's own k_p). For ODEs, k is meaningless
+    (precision is deg) and may be empty. Returns False (rather than
+    raising) on any malformed proof, a canonical-equation mismatch,
+    or an unmet/invalid precision requirement.
     """
     # Fixed-point nonlinear Chebyshev: proof has cheb_fp_spec
     # The eq_str is the original cheb(...) form.
@@ -1246,8 +1249,6 @@ def verify_equation(eq_str, proof, precision):
     # ODEs/Chebyshev: k is meaningless; allow empty.
     _, _, _, _, ode_spec, cheb_spec = circuit_mod.parse_polynomial(eq_str)
     is_func_eq = ode_spec is not None or cheb_spec is not None
-    if not is_func_eq and not str(precision).strip():
-        raise ValueError("precision k is required to verify")
     if is_func_eq and not str(precision).strip():
         precision = "1"  # dummy; canonical has no k
     try:
@@ -1316,13 +1317,32 @@ def verify_equation(eq_str, proof, precision):
             if proof_eq != circ.canonical:
                 return False
             return bulletproof.verify(circ, proof)
-        # NOTE: k comes ONLY from the caller's explicit input (the
-        # definition), NEVER from proof.get("precision").
+        # Precision (coarse rule, mirroring the ODE deg pattern above):
+        # k_p is read from the proof and the circuit is rebuilt with
+        # it, so the proof must genuinely be a proof at precision
+        # 1/k_p -- the value cannot be faked by editing the field,
+        # because the canonical form (which embeds ";k=<k_p>") and the
+        # constraint system are both derived from it. The caller's k
+        # is a requirement: empty means none; otherwise require
+        # k <= k_p (finer proof satisfies a coarser demand).
         # The complex marker (;cx=1) is part of the circuit identifier
         # (like the equation), not the precision -- it tells the verifier
         # which circuit to build.
+        k_prove_raw = proof.get("precision")
+        if k_prove_raw is None or not str(k_prove_raw).strip():
+            return False
+        k_prove = str(k_prove_raw).strip()
+        req = str(precision).strip()
+        if req:
+            try:
+                k_req = int(req)
+                k_p_int = int(k_prove)
+            except ValueError:
+                return False
+            if k_req < 1 or k_req > k_p_int:
+                return False
         is_complex = proof_eq.endswith(";cx=1")
-        circ = circuit_mod.compile(eq_str, str(precision).strip(),
+        circ = circuit_mod.compile(eq_str, k_prove,
                                    force_complex=is_complex)
         if proof.get("equation") != circ.canonical:
             return False

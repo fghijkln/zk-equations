@@ -189,10 +189,13 @@ check("different equation still fails",
 check("scaled (different poly) still fails",
       api.verify_equation("2*x^3 + 4*x + 10 = 76", pm, K) is False)
 
-# ---------------- 7. precision: mandatory, by definition ----------------
+# ---------------- 7. precision: coarse verification rule ----------------
 # Final precision is 1/k (k = user-supplied denominator). The witness
-# must be within 1/k of an exact root. The verifier MUST supply k
-# explicitly; it is NEVER taken from the proof.
+# must be within 1/k of an exact root. At verify time the circuit is
+# rebuilt with the prover's k_p recorded in the proof (unfakeable: the
+# canonical form and constraints derive from it); the verifier's k is
+# a requirement -- k <= k_p verifies, k > k_p fails, empty = no
+# requirement. Mirrors the ODE deg coarse rule.
 
 t0 = time.time()
 w_sin = api.solve_equation("sin(x) = 0.5", decimals=8)[0]
@@ -203,13 +206,15 @@ okt = api.verify_equation("sin(x) = 0.5", pt, "1000")
 tvt = time.time() - t0
 check("sin(x)=0.5 @1/1000 verifies (prove %.1fs, verify %.1fs)" % (tpt, tvt),
       okt)
-# verify WITHOUT k must raise (never fall back to the proof's k)
-expect_raises("verify without precision raises",
-              lambda: api.verify_equation("sin(x) = 0.5", pt, ""))
+# verify WITHOUT k: no extra requirement -> proof's own k_p applies
+check("verify without precision uses proof's k",
+      api.verify_equation("sin(x) = 0.5", pt, ""))
 check("sin moved term verifies",
       api.verify_equation("sin(x) - 0.5 = 0", pt, "1000"))
-check("sin wrong k fails",
-      api.verify_equation("sin(x) = 0.5", pt, "100") is False)
+check("sin coarser k (100 <= 1000) verifies",
+      api.verify_equation("sin(x) = 0.5", pt, "100"))
+check("sin finer k (10000 > 1000) fails",
+      api.verify_equation("sin(x) = 0.5", pt, "10000") is False)
 expect_raises("sin bad witness refused",
               lambda: api.prove_equation("sin(x) = 0.5", "1.0", "1000"))
 expect_raises("sin missing precision refused",
@@ -277,14 +282,14 @@ check("decimal-form integer witness proves",
 expect_raises("non-integer witness refused for integer equation",
               lambda: api.prove_equation("x^3 + 2*x + 5 = 38", "3.5", K))
 
-# the proof's "precision" field is informational only: tampering with it
-# must NOT affect verification, which uses the caller-supplied k
-# (the definition), never the proof's value
+# the proof's "precision" field records the proven k_p and the circuit
+# is rebuilt from it: tampering with it breaks verification (the
+# canonical form embeds the untampered k), at ANY verifier requirement
 pt2 = copy.deepcopy(pt)
 pt2["precision"] = 100
-check("tampered proof precision field ignored (explicit k verifies)",
-      api.verify_equation("sin(x) = 0.5", pt2, "1000"))
-check("tampered proof precision + wrong k still fails",
+check("tampered proof precision field fails (req 1000)",
+      api.verify_equation("sin(x) = 0.5", pt2, "1000") is False)
+check("tampered proof precision field fails (req 100)",
       api.verify_equation("sin(x) = 0.5", pt2, "100") is False)
 
 # ---------------- 8. precision mandatory in both modes ----------------
@@ -292,9 +297,9 @@ check("tampered proof precision + wrong k still fails",
 # is a pure size optimization chosen from the equation alone.
 expect_raises("integer equation without precision refused",
               lambda: api.prove_equation("x^5=1", 1, ""))
-expect_raises("verify without precision raises",
-              lambda: api.verify_equation(
-                  "x^5=1", api.prove_equation("x^5=1", 1, "1000"), ""))
+check("verify without precision uses proof's k (exact)",
+      api.verify_equation(
+          "x^5=1", api.prove_equation("x^5=1", 1, "1000"), ""))
 pt5 = api.prove_equation("x^5 = 1.0", "1.0", "1000")
 check("x^5=1.0 @1/1000 verifies",
       api.verify_equation("x^5 = 1.0", pt5, "1000"))
@@ -311,8 +316,8 @@ expect_raises("decimal witness for integer equation refused",
 pc1 = api.prove_equation("x^2 + 1 = 0", "i", "1000")
 check("x^2+1=0 witness i verifies",
       api.verify_equation("x^2 + 1 = 0", pc1, "1000"))
-check("x^2+1=0 witness i wrong k fails",
-      api.verify_equation("x^2 + 1 = 0", pc1, "999") is False)
+check("x^2+1=0 witness i finer k (1001 > 1000) fails",
+      api.verify_equation("x^2 + 1 = 0", pc1, "1001") is False)
 pc2 = api.prove_equation("x^2 + 1 = 0", "-i", "1000")
 check("x^2+1=0 witness -i verifies",
       api.verify_equation("x^2 + 1 = 0", pc2, "1000"))
@@ -345,9 +350,9 @@ check("integral x=int(x^2,0,1) proves",
 # Red line: no numeric value in the equation field
 check("integral equation hides numeric value",
       "0.333" not in pi["equation"] and pi["equation"].startswith("x=int("))
-# Wrong k does not verify
-check("integral wrong k rejected",
-      not api.verify_equation("x = int(x^2, 0, 1)", pi, "999"))
+# Finer-than-proven k does not verify
+check("integral finer k rejected",
+      not api.verify_equation("x = int(x^2, 0, 1)", pi, "1001"))
 # Reversed form
 pi2 = api.prove_equation("int(x^2, 0, 1) = x", iv, "1000")
 check("integral int=x form proves",

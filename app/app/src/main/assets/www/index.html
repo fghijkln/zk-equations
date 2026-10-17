@@ -148,7 +148,7 @@ const STR = {
     noRoots: "在有意义区间内未找到实数解",
     rootN: "解",
     prec_l: "精确度 k", prec_h: "必填。最终精度为 1/k。严格含义：你知道的数与方程精确根相差小于此值，否则拒绝生成证明。任何方程（无论有没有无穷小数根）都必须手动填写；小数最多 12 位。",
-    prec_l2: "精确度 k", prec_h2: "可留空：留空时使用证明里记录的 k。填写时须与生成证明时一致，否则验证失败。",
+    prec_l2: "精确度 k", prec_h2: "可留空（留空即按证明自身的精度认定）。填写时：不大于生成时的 k 即可通过（更粗的要求），大于生成时的 k 则失败。",
     precRequired: "请填写精确度 k",
     verify_h: "验证证明", verify_d: "任何人拿到方程和证明，都能确认方程成立——但无法得知解是多少。",
     proof_l: "证明（JSON）", btnVerify: "验证",
@@ -174,7 +174,7 @@ const STR = {
     noRoots: "No real roots found in the meaningful interval",
     rootN: "Root",
     prec_l: "Precision k", prec_h: "Required. Final precision is 1/k. Strict meaning: the number you know differs from the exact root by less than this, otherwise proving is refused. Every equation (whether or not its roots are infinite decimals) requires k; decimals support 12 places.",
-    prec_l2: "Precision k", prec_h2: "Optional: if left blank, the k recorded in the proof is used. If filled in, it must match the k used at generation time.",
+    prec_l2: "Precision k", prec_h2: "Optional: leave blank to accept the proof's own proven precision. If filled in, any k up to the generation-time k passes (coarser requirement); a larger k fails.",
     precRequired: "Precision k is required",
     verify_h: "Verify", verify_d: "Anyone with the equation and the proof can confirm it holds — without learning the witness.",
     proof_l: "Proof (JSON)", btnVerify: "Verify",
@@ -297,8 +297,8 @@ document.getElementById("btnVerify").onclick = () => {
   setTimeout(() => {
     try {
       const k2 = document.getElementById("prec2").value.trim();
-      // k2 may be empty: the bridge then falls back to the k embedded
-      // in the proof. A filled k2 must still match generation time.
+      // k2 may be empty: the verifier then applies the proof's own
+      // proven precision. A filled k2 is a requirement (<= proven k).
       const r = JSON.parse(api().verify(
         document.getElementById("eq2").value,
         document.getElementById("proofIn").value, k2));
