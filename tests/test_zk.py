@@ -339,6 +339,37 @@ expect_raises("wrong complex witness refused",
 expect_raises("non-Gaussian witness refused",
               lambda: api.prove_equation("x^2 + 1 = 0", "0.5i", "1000"))
 
+# ---- complex tolerance mode (decimal complex equations) ----
+# Box bound: both residual parts < 1/k. Decimal spelling selects it.
+pct = api.prove_equation("x^2 + 1.0 = 0", "0.0001+0.9999i", "1000")
+check("complex tolerance x^2+1.0=0 verifies",
+      api.verify_equation("x^2 + 1.0 = 0", pct, "1000"))
+check("complex tolerance coarser k verifies",
+      api.verify_equation("x^2 + 1.0 = 0", pct, "100"))
+check("complex tolerance finer k fails",
+      api.verify_equation("x^2 + 1.0 = 0", pct, "10000") is False)
+pct2 = api.prove_equation("x^2 + 1.0 = 0", "0.0+1.0i", "1000")
+check("complex tolerance exact root in decimal form verifies",
+      api.verify_equation("x^2 + 1.0 = 0", pct2, "1000"))
+pct3 = api.prove_equation("x^2 + 1.0 = 0", "-0.0001-0.9999i", "1000")
+check("complex tolerance negative root verifies",
+      api.verify_equation("x^2 + 1.0 = 0", pct3, "1000"))
+# complex coefficients (degree 1), real witness
+pct4 = api.prove_equation("(0.5+0.5i)*x = 1+1i", "2", "1000")
+check("complex tolerance complex coeffs, real witness verifies",
+      api.verify_equation("(0.5+0.5i)*x = 1+1i", pct4, "1000"))
+# real coefficients, complex witness (forced complex circuit)
+pct5 = api.prove_equation("x^2 - 2.0 = 0", "1.4142+0.0001i", "1000")
+check("complex tolerance real coeffs, complex witness verifies",
+      api.verify_equation("x^2 - 2.0 = 0", pct5, "1000"))
+expect_raises("complex tolerance bad witness refused",
+              lambda: api.prove_equation("x^2 + 1.0 = 0", "0.5+0.5i",
+                                         "1000"))
+pct_t = copy.deepcopy(pct)
+pct_t["AI"] = "zz"
+check("complex tolerance tampered proof fails",
+      api.verify_equation("x^2 + 1.0 = 0", pct_t, "1000") is False)
+
 # ---- integral equations: x = int(f, a, b) ----
 # integral_value helper
 iv = api.integral_value("x = int(x^2, 0, 1)")

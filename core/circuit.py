@@ -1032,6 +1032,71 @@ def _canon_poly_complex(poly):
     return s + "=0"
 
 
+def _fmt_complex_frac(c):
+    """(re, im) Fractions -> string like "1/2+3/4i", "2", "-i"."""
+    def fmt(f):
+        return (str(f.numerator) if f.denominator == 1
+                else "%d/%d" % (f.numerator, f.denominator))
+    re, im = c
+    if im == 0:
+        return fmt(re)
+    if re == 0:
+        if im == 1:
+            return "i"
+        if im == -1:
+            return "-i"
+        return "%si" % fmt(im)
+    if im == 1:
+        im_s = "+i"
+    elif im == -1:
+        im_s = "-i"
+    elif im > 0:
+        im_s = "+%si" % fmt(im)
+    else:
+        im_s = "%si" % fmt(im)
+    return "%s%s" % (fmt(re), im_s)
+
+
+def _canon_poly_frac_complex(poly):
+    """poly: {exp: (re, im) Fractions} -> canonical string.
+
+    Complex counterpart of _canon_poly_frac (same term layout as
+    _canon_poly_complex, with fractional coefficients). Deterministic
+    in the polynomial; used for complex tolerance circuits.
+    """
+    terms = []
+    for e in sorted(poly.keys(), reverse=True):
+        c = poly[e]
+        if c == (0, 0):
+            continue
+        cs = _fmt_complex_frac(c)
+        if cs.startswith("-"):
+            sign = "-"
+            body_c = cs[1:]
+        else:
+            sign = "+"
+            body_c = cs
+        if e == 0:
+            body = body_c
+        elif e == 1:
+            if c == (1, 0):
+                body = "x"
+            else:
+                body = "(%s)*x" % cs
+        else:
+            if c == (1, 0):
+                body = "x^%d" % e
+            else:
+                body = "(%s)*x^%d" % (cs, e)
+        terms.append((sign, body))
+    if not terms:
+        return "0=0"
+    s = ("" if terms[0][0] == "+" else "-") + terms[0][1]
+    for sign, body in terms[1:]:
+        s += sign + body
+    return s + "=0"
+
+
 def _to_signed(c):
     c %= N
     return c if c <= N // 2 else c - N
@@ -1162,11 +1227,13 @@ class Circuit:
         else:
             self.mode = "tolerance"
             if is_complex:
-                # TODO: complex tolerance circuit
-                raise ValueError("complex tolerance mode not yet implemented")
-            self._build_tolerance(poly, self.precision)
-            self.canonical = ("%s;k=%d"
-                              % (_canon_poly_frac(poly), self.precision))
+                self._build_tolerance_complex(poly, self.precision)
+                self.canonical = ("%s;k=%d;cx=1" % (
+                    _canon_poly_frac_complex(poly), self.precision))
+            else:
+                self._build_tolerance(poly, self.precision)
+                self.canonical = ("%s;k=%d"
+                                  % (_canon_poly_frac(poly), self.precision))
 
     # ---- exact mode (unchanged semantics) ----
 
@@ -2493,13 +2560,13 @@ class Circuit:
         S = TOL_S
         a = {}
         for e, c in poly.items():
-            # c is a (re, im) pair; tolerance mode is real-only for now.
-            # (Complex tolerance with R^2+I^2<=B^2 is future work.)
+            # c is a (re, im) pair; complex equations are routed to
+            # _build_tolerance_complex by compile(), never here.
             if isinstance(c, tuple):
                 if c[1] != 0:
                     raise ValueError(
-                        "complex tolerance mode not yet implemented; "
-                        "use Gaussian integer equations for complex")
+                        "internal error: complex coefficients reached "
+                        "the real tolerance builder")
                 c = c[0]
             a[e] = _round_frac(S * c / (M_DEC ** e))
         self._tol_a = a
@@ -2584,6 +2651,170 @@ class Circuit:
         gate("L", 0, 1, acc)
         for i in range(m2):
             gate("L", dom0 + i, -(1 << i), acc)
+        cons.append((acc, (-XR) % N))
+
+        self._densify(cons, n)
+
+    # ---- tolerance mode (complex) ----
+
+    def _build_tolerance_complex(self, poly, k):
+        """Complex tolerance circuit: box-bound residual.
+
+        poly: {exp: (re, im) Fractions}. Witness is a pair (U, V) of
+        scaled integers, z = (U + iV) / M_DEC. Coefficients are scaled
+        per part, A_e = round(S * c_e / M^e) with S = TOL_S, so the
+        Gaussian-integer value P = sum_e A_e (U+iV)^e satisfies
+        P / S ~= T(z) for the true polynomial T. The circuit proves
+            |Re P| <= B  AND  |Im P| <= B,   B = ceil(S/k) - 1,
+        i.e. both residual parts are < 1/k (BOX bound). The disk bound
+        |P|^2 <= B^2 is deliberately not used: squaring an S-scale
+        value overflows the field (S ~ 10^70, N ~ 10^77). A witness
+        passing the prover's modulus pre-check always satisfies the
+        box, so honest proving is unaffected. Domain: |U|, |V| <= XR
+        with XR = M_DEC * R_DOM, each by bit decomposition, as in the
+        real tolerance circuit. Polynomial evaluation is Horner with
+        Karatsuba 3-mult, as in the exact complex circuit.
+        """
+        d = max(poly.keys()) if poly else 0
+        self.degree = d
+        S = TOL_S
+        a = {}
+        for e, c in poly.items():
+            a[e] = (_round_frac(S * c[0] / (M_DEC ** e)),
+                    _round_frac(S * c[1] / (M_DEC ** e)))
+        self._tol_a_c = a
+        self._tol_d = d
+        self._tol_S = S
+        B = (S + k - 1) // k - 1
+        self._tol_B = B
+        XR = M_DEC * R_DOM
+        self._tol_XR = XR
+        # Field-size guards. (sqrt(2)*XR)^e <= XR^e * 2^ceil(e/2), so
+        # RES over-bounds the final residual parts and ACC over-bounds
+        # every Horner accumulator (the constant term A_0 never enters
+        # a product). Karatsuba products are then <= 2*XR*ACC.
+        ACC = 0
+        RES = 0
+        for e, (ar, ai) in a.items():
+            mag = abs(ar) + abs(ai)
+            RES += mag * (XR ** e) * (1 << ((e + 1) // 2))
+            if e >= 1:
+                ACC += mag * (XR ** (e - 1)) * (1 << (e // 2))
+        if RES >= N // 4 or 2 * XR * ACC >= N // 2:
+            raise ValueError("equation too large for the field "
+                             "(reduce degree or range)")
+        m = (2 * B).bit_length() if B > 0 else 0  # bits per residual part
+        m2 = (2 * XR).bit_length()                # bits per domain part
+        self._tol_m = m
+        self._tol_m2 = m2
+
+        if d == 0:
+            a0 = a.get(0, (0, 0))
+            if abs(a0[0]) > B or abs(a0[1]) > B:
+                raise ValueError("no solution within precision 1/%d" % k)
+            # vacuously true: dummy zero gate, no constraints
+            self.n = 1
+            self._tol_rbit0 = 1
+            self._tol_ibit0 = 1
+            self._tol_dom0 = 1
+            self._tol_dom1 = 1
+            self._densify([], 1)
+            return
+
+        # Gate layout: 0,1 witness gates; 2..2+3d-1 Horner Karatsuba
+        # gates; then residual-Re bits, residual-Im bits, domain-U
+        # bits, domain-V bits (bit gates carry the bit in all wires).
+        rbit0 = 2 + 3 * d
+        ibit0 = rbit0 + m
+        dom0 = ibit0 + m
+        dom1 = dom0 + m2
+        self._tol_rbit0 = rbit0
+        self._tol_ibit0 = ibit0
+        self._tol_dom0 = dom0
+        self._tol_dom1 = dom1
+        n_real = dom1 + m2
+        n = 1
+        while n < n_real:
+            n *= 2
+        self.n = n
+
+        cons = []
+
+        def gate(which, i, coeff, acc):
+            acc[which, i] = (acc.get((which, i), 0) + coeff) % N
+
+        def _add_lin(dst, src, sign=1):
+            for kk, v in src.items():
+                dst[kk] = (dst.get(kk, 0) + sign * v) % N
+
+        # Horner with scaled Gaussian-integer coefficients, mirroring
+        # _build_exact_complex's constraint generation.
+        aN = {e: (ar % N, ai % N) for e, (ar, ai) in a.items()}
+        c_d = aN[d]
+        R = {}
+        I = {}
+        R_const = c_d[0]
+        I_const = c_d[1]
+        g = 2
+        for e in range(d - 1, -1, -1):
+            c_e = aN.get(e, (0, 0))
+            S1 = {}
+            _add_lin(S1, R, 1)
+            _add_lin(S1, I, 1)
+            S1_const = (R_const + I_const) % N
+            S2 = {("L", 1): 1, ("L", 0): N - 1}   # B - A (witness)
+            S3 = {("L", 0): 1, ("L", 1): 1}       # A + B (witness)
+            for kk, (linL, constL, linR, constR) in enumerate([
+                (None, 0, S1, S1_const),      # k1 = A * (R+I)
+                (R, R_const, S2, 0),          # k2 = R * (B-A)
+                (I, I_const, S3, 0),          # k3 = I * (A+B)
+            ]):
+                gi = g + kk
+                acc = {}
+                gate("L", gi, 1, acc)
+                if linL is None:
+                    gate("L", 0, N - 1, acc)  # aL[gi] = aL[0] = A
+                    cons.append((acc, 0))
+                else:
+                    for (w, idx), coeff in linL.items():
+                        gate(w, idx, N - coeff, acc)
+                    cons.append((acc, constL % N))
+                acc = {}
+                gate("R", gi, 1, acc)
+                for (w, idx), coeff in linR.items():
+                    gate(w, idx, N - coeff, acc)
+                cons.append((acc, constR % N))
+            # New acc: R' = k1 - k3 + re(c_e), I' = k1 + k2 + im(c_e).
+            R = {("O", g): 1, ("O", g + 2): N - 1}
+            I = {("O", g): 1, ("O", g + 1): 1}
+            R_const = c_e[0]
+            I_const = c_e[1]
+            g += 3
+
+        # Residual box bound: Re P + B = sum_i 2^i rb_i (likewise Im),
+        # so the decompositions pin both parts to [-B, B].
+        acc = {}
+        for (w, idx), coeff in R.items():
+            gate(w, idx, coeff, acc)
+        for i in range(m):
+            gate("L", rbit0 + i, -(1 << i), acc)
+        cons.append((acc, (-(R_const + B)) % N))
+        acc = {}
+        for (w, idx), coeff in I.items():
+            gate(w, idx, coeff, acc)
+        for i in range(m):
+            gate("L", ibit0 + i, -(1 << i), acc)
+        cons.append((acc, (-(I_const + B)) % N))
+        # Domain: U + XR = sum_i 2^i db_i, V + XR = sum_i 2^i eb_i.
+        acc = {}
+        gate("L", 0, 1, acc)
+        for i in range(m2):
+            gate("L", dom0 + i, -(1 << i), acc)
+        cons.append((acc, (-XR) % N))
+        acc = {}
+        gate("L", 1, 1, acc)
+        for i in range(m2):
+            gate("L", dom1 + i, -(1 << i), acc)
         cons.append((acc, (-XR) % N))
 
         self._densify(cons, n)
@@ -2756,6 +2987,10 @@ class Circuit:
                 aO[0] = X
             return aL, aR, aO
 
+        # tolerance mode (complex): X is a pair (U, V) of scaled ints
+        if hasattr(self, '_tol_a_c'):
+            return self._evaluate_tolerance_complex(X)
+
         # tolerance mode
         X = int(X)
         d = self._tol_d
@@ -2794,6 +3029,75 @@ class Circuit:
             bit = (v >> i) & 1
             aL[dom0 + i] = aR[dom0 + i] = aO[dom0 + i] = bit
         return aL, aR, aO
+
+    def _evaluate_tolerance_complex(self, X):
+        """Wire values for complex tolerance: X = (U, V) scaled ints."""
+        n = self.n
+        aL = [0] * n
+        aR = [0] * n
+        aO = [0] * n
+        d = self._tol_d
+        if d == 0:
+            return aL, aR, aO  # dummy zero gate (compile-time decided)
+        U, V = int(X[0]), int(X[1])
+        A, Bv = U % N, V % N
+        aL[0] = A; aR[0] = 1; aO[0] = A  # witness re
+        aL[1] = Bv; aR[1] = 1; aO[1] = Bv  # witness im
+        a = self._tol_a_c
+        aN = {e: (ar % N, ai % N) for e, (ar, ai) in a.items()}
+        # Horner over the field, mirroring the constraint builder.
+        R, I = aN[d][0], aN[d][1]
+        g = 2
+        for e in range(d - 1, -1, -1):
+            # k1 = A*(R+I), k2 = R*(B-A), k3 = I*(A+B)
+            S1 = (R + I) % N
+            S2 = (Bv - A) % N
+            S3 = (A + Bv) % N
+            k1 = (A * S1) % N
+            k2 = (R * S2) % N
+            k3 = (I * S3) % N
+            aL[g] = A; aR[g] = S1; aO[g] = k1
+            aL[g + 1] = R; aR[g + 1] = S2; aO[g + 1] = k2
+            aL[g + 2] = I; aR[g + 2] = S3; aO[g + 2] = k3
+            c_e = aN.get(e, (0, 0))
+            R = (k1 - k3 + c_e[0]) % N
+            I = (k1 + k2 + c_e[1]) % N
+            g += 3
+        # Bit decompositions from exact Gaussian-integer arithmetic.
+        B = self._tol_B
+        XR = self._tol_XR
+        m = self._tol_m
+        m2 = self._tol_m2
+        PR, PI = self._tol_eval_int(a, U, V)
+        u_re = PR + B
+        u_im = PI + B
+        assert u_re >= 0 and u_im >= 0, "compiler bug: negative slack"
+        for i in range(m):
+            aL[self._tol_rbit0 + i] = aR[self._tol_rbit0 + i] = \
+                aO[self._tol_rbit0 + i] = (u_re >> i) & 1
+            aL[self._tol_ibit0 + i] = aR[self._tol_ibit0 + i] = \
+                aO[self._tol_ibit0 + i] = (u_im >> i) & 1
+        v_re = U + XR
+        v_im = V + XR
+        assert v_re >= 0 and v_im >= 0, "compiler bug: negative slack"
+        for i in range(m2):
+            aL[self._tol_dom0 + i] = aR[self._tol_dom0 + i] = \
+                aO[self._tol_dom0 + i] = (v_re >> i) & 1
+            aL[self._tol_dom1 + i] = aR[self._tol_dom1 + i] = \
+                aO[self._tol_dom1 + i] = (v_im >> i) & 1
+        return aL, aR, aO
+
+    @staticmethod
+    def _tol_eval_int(a, U, V):
+        """Exact Gaussian-integer P(U, V) = sum_e A_e (U+iV)^e."""
+        PR, PI = 0, 0
+        zr, zi = 1, 0  # (U+iV)^0
+        for e in range(0, max(a.keys()) + 1 if a else 0):
+            ar, ai = a.get(e, (0, 0))
+            PR += ar * zr - ai * zi
+            PI += ar * zi + ai * zr
+            zr, zi = zr * U - zi * V, zr * V + zi * U
+        return PR, PI
 
     def check_witness(self, X):
         """True iff X satisfies the equation (within precision)."""
@@ -2896,6 +3200,15 @@ class Circuit:
             for exp, coeff in self._exact_poly.items():
                 v = (v + coeff * pow(X, exp, N)) % N
             return v == 0
+        if hasattr(self, '_tol_a_c'):
+            # Complex tolerance: box bound on both residual parts.
+            U, V = int(X[0]), int(X[1])
+            if abs(U) > self._tol_XR or abs(V) > self._tol_XR:
+                return False
+            if self._tol_d == 0:
+                return True  # compile-time decided
+            PR, PI = self._tol_eval_int(self._tol_a_c, U, V)
+            return abs(PR) <= self._tol_B and abs(PI) <= self._tol_B
         X = int(X)
         d = self._tol_d
         if d == 0:

@@ -425,10 +425,16 @@ def prove_equation(eq_str, witness, precision):
             raise ValueError("witness does not satisfy the equation")
         aL, aR, aO = circ.evaluate(w)
     else:
-        # TODO: complex tolerance mode
-        if w_is_complex:
-            raise ValueError("complex tolerance mode not yet implemented")
-        if circ.mode == "ftc":
+        if circ.is_complex:
+            # Complex tolerance: quantized (U, V) pair; the circuit
+            # proves both residual parts < 1/k (box bound).
+            X = (_quantize(w_pair[0]),
+                 _quantize(w_pair[1]) if w_is_complex else 0)
+            if not circ.check_witness(X):
+                raise ValueError(
+                    "witness does not satisfy within 1/%d" % k)
+            aL, aR, aO = circ.evaluate(X)
+        elif circ.mode == "ftc":
             # FTC: witness is [F_0..F_{d+1}, v] as field elements.
             # Compute F analytically from f; v is the EXACT I_true = F(b)-F(a)
             # (not the user's decimal, which has quantization error).
